@@ -1,0 +1,55 @@
+name: Sliver BOF end-to-end tests
+description: Run Sliver BOFs against real session and beacon implants on GitHub Actions.
+author: Sliver Armory
+
+inputs:
+  manifest:
+    description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-bof-e2e.yml
+  target:
+    description: One manifest target to run, formatted as os/arch. Required when the manifest has more than one target.
+    required: false
+  sliver-version:
+    description: Optional Sliver selector override (master, latest, vX.Y.Z, or a full commit SHA). Defaults to manifest sliver.version.
+    required: false
+  sliver-server-path:
+    description: Optional path to an existing sliver-server binary. Intended for direct single-target action use.
+    required: false
+  results-dir:
+    description: Directory for JSON, JUnit, logs, and captured BOF output, relative to the caller workspace unless absolute.
+    required: false
+    default: .sliver-bof-e2e/results
+  github-token:
+    description: Optional GitHub token used only by the isolated acquisition phase. It is not passed to the test phase, Sliver, or implants.
+    required: false
+  action-version:
+    description: Optional immutable action identity to record, formatted as repository@commit. Direct action use derives this from the action ref.
+    required: false
+
+outputs:
+  results-dir:
+    description: Absolute path containing the generated result files.
+    value: ${{ steps.run.outputs.results-dir }}
+  resolved-sliver:
+    description: Immutable Sliver selector selected by the controller.
+    value: ${{ steps.run.outputs.resolved-sliver }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run target
+      id: run
+      uses: $/.github/actions/run
+      with:
+        manifest: ${{ inputs.manifest }}
+        target: ${{ inputs.target }}
+        sliver-version: ${{ inputs.sliver-version }}
+        sliver-server-path: ${{ inputs.sliver-server-path }}
+        results-dir: ${{ inputs.results-dir }}
+        github-token: ${{ inputs.github-token }}
+        action-version: ${{ inputs.action-version }}
+
+branding:
+  icon: check-circle
+  color: gray-dark

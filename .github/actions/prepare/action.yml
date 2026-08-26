@@ -1,0 +1,51 @@
+name: Prepare one Sliver BOF end-to-end target
+description: Build the trusted controller and acquire Sliver before native BOF execution.
+
+inputs:
+  manifest:
+    description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-bof-e2e.yml
+  target:
+    description: Manifest target to prepare, formatted as os/arch. Optional for a single-target manifest.
+    required: false
+  sliver-version:
+    description: Optional Sliver selector override.
+    required: false
+  sliver-server-path:
+    description: Optional path to an existing sliver-server binary.
+    required: false
+  results-dir:
+    description: Directory for this target's result files.
+    required: true
+  github-token:
+    description: Optional GitHub token used only by this short-lived acquisition action.
+    required: false
+  action-version:
+    description: Immutable action identity recorded in the report.
+    required: false
+outputs:
+  action-root:
+    description: Immutable checked-out action source directory.
+  action-version:
+    description: Normalized action identity used by the runtime.
+  controller:
+    description: Private compiled controller executable.
+  node:
+    description: Runner-provided Node executable used only for fallback cleanup.
+  prepared-dir:
+    description: Private acquisition handoff directory.
+  prepared-file:
+    description: Credential-free acquisition descriptor.
+  state-file:
+    description: Private durable cleanup state file.
+  target:
+    description: Normalized target selected from the manifest.
+  results-dir:
+    description: Absolute results directory.
+  resolved-sliver:
+    description: Immutable Sliver selector actually prepared.
+
+runs:
+  using: node24
+  main: ../../../dist/index.js

@@ -1,0 +1,408 @@
+package manifest
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestLoadNormalizesExpandsAndBuildsMatrix(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/direct.o", 0x8664)
+	writeCOFFObject(t, workspace, "objects/group/b.o", 0x8664)
+	writeCOFFObject(t, workspace, "objects/group/a.o", 0x8664)
+	writeFile(t, workspace, "fixtures/input.bin", []byte("file argument"))
+
+	manifestPath := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver:
+  version: master
+defaults:
+  bof_executor: reflektor
+  entrypoint: go
+  modes: [session, beacon]
+  repeat: 1
+  command_timeout: 2m
+suites:
+  - name: windows-amd64
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: direct
+        object: objects/direct.o
+        modes: [session]
+        repeat: 2
+        args:
+          - {type: integer, value: 4294967295}
+          - {type: short, value: 65535}
+          - {type: string, value: hello}
+          - {type: wstring, value: world}
+          - {type: file, value: fixtures/input.bin}
+          - {type: bytes_base64, value: AQID}
+        expect:
+          output:
+            contains: [hello]
+            not_contains: [failure]
+            matches: ['(?m)^hello']
+    collections:
+      - name: smoke
+        glob: objects/group/*.o
+        expect:
+          success_only: true
+        overrides:
+          a.o:
+            expect:
+              output:
+                equals_base64: ''
+          b.o:
+            bof_executor: coff-loader
+            modes: [beacon]
+            repeat: 3
+            args_raw_base64: AQI=
+`)
+
+	loaded, err := Load(filepath.Base(manifestPath), workspace)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Workspace != canonical(t, workspace) {
+		t.Fatalf("Workspace = %q, want %q", loaded.Workspace, canonical(t, workspace))
+	}
+	if len(loaded.Plans) != 3 {
+		t.Fatalf("len(Plans) = %d, want 3", len(loaded.Plans))
+	}
+	direct := loaded.Plans[0]
+	if direct.ID != "windows-amd64/direct" || direct.Settings.Repeat != 2 {
+		t.Fatalf("direct plan = %#v", direct)
+	}
+	if got, want := direct.Settings.Modes, []string{ModeSession}; !equalStrings(got, want) {
+		t.Fatalf("direct modes = %v, want %v", got, want)
+	}
+	if direct.Settings.CommandTimeout != 2*time.Minute {
+		t.Fatalf("direct timeout = %s", direct.Settings.CommandTimeout)
+	}
+	if len(direct.Settings.Args) != 6 {
+		t.Fatalf("len(direct args) = %d, want 6", len(direct.Settings.Args))
+	}
+	if direct.Settings.Args[0].Type != "int" || direct.Settings.Args[0].Integer != ^uint32(0) {
+		t.Fatalf("normalized int = %#v", direct.Settings.Args[0])
+	}
+	if direct.Settings.Args[1].Short != ^uint16(0) {
+		t.Fatalf("normalized short = %#v", direct.Settings.Args[1])
+	}
+	if direct.Settings.Args[4].File != canonical(t, filepath.Join(workspace, "fixtures/input.bin")) {
+		t.Fatalf("normalized file = %q", direct.Settings.Args[4].File)
+	}
+	if got := direct.Settings.Args[5].Bytes; string(got) != "\x01\x02\x03" {
+		t.Fatalf("normalized bytes = %x", got)
+	}
+
+	if loaded.Plans[1].ID != "windows-amd64/smoke/a.o" || loaded.Plans[2].ID != "windows-amd64/smoke/b.o" {
+		t.Fatalf("collection plans are not basename-sorted: %q, %q", loaded.Plans[1].ID, loaded.Plans[2].ID)
+	}
+	if !loaded.Plans[1].Settings.Expect.Output.HasEqualsB64 || len(loaded.Plans[1].Settings.Expect.Output.EqualsBytes) != 0 {
+		t.Fatalf("empty binary equality was not preserved: %#v", loaded.Plans[1].Settings.Expect.Output)
+	}
+	overridden := loaded.Plans[2].Settings
+	if overridden.BOFExecutor != ExecutorCOFFLoader || overridden.Repeat != 3 || !equalStrings(overridden.Modes, []string{ModeBeacon}) {
+		t.Fatalf("collection override = %#v", overridden)
+	}
+	if !overridden.HasRawArgs || string(overridden.RawArgs) != "\x01\x02" || len(overridden.Args) != 0 {
+		t.Fatalf("collection raw args = %x; typed args = %#v", overridden.RawArgs, overridden.Args)
+	}
+
+	matrixJSON, err := json.Marshal(loaded.Matrix())
+	if err != nil {
+		t.Fatalf("json.Marshal(Matrix()) error = %v", err)
+	}
+	wantMatrix := `{"include":[{"target":"windows/amd64","runner":"windows-2022","key":"windows-amd64"}]}`
+	if string(matrixJSON) != wantMatrix {
+		t.Fatalf("Matrix JSON = %s, want %s", matrixJSON, wantMatrix)
+	}
+	if got := len(loaded.PlansForTarget("windows/amd64")); got != 3 {
+		t.Fatalf("PlansForTarget() length = %d, want 3", got)
+	}
+}
+
+func TestMatrixUsesUniqueDeterministicTargetOrder(t *testing.T) {
+	loaded := &Manifest{Plans: []Plan{
+		{Target: Target{OS: "windows", Arch: "amd64"}},
+		{Target: Target{OS: "linux", Arch: "arm64"}},
+		{Target: Target{OS: "windows", Arch: "amd64"}},
+		{Target: Target{OS: "darwin", Arch: "arm64"}},
+	}}
+	matrix := loaded.Matrix()
+	got := make([]string, 0, len(matrix.Include))
+	for _, entry := range matrix.Include {
+		got = append(got, entry.Target+"@"+entry.Runner)
+	}
+	want := []string{
+		"darwin/arm64@macos-15",
+		"linux/arm64@ubuntu-24.04-arm",
+		"windows/amd64@windows-2022",
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("Matrix order = %v, want %v", got, want)
+	}
+}
+
+func TestRunnerForTargetAllowlist(t *testing.T) {
+	tests := []struct {
+		target Target
+		runner string
+	}{
+		{Target{OS: "darwin", Arch: "amd64"}, "macos-15-intel"},
+		{Target{OS: "darwin", Arch: "arm64"}, "macos-15"},
+		{Target{OS: "linux", Arch: "386"}, "ubuntu-24.04"},
+		{Target{OS: "linux", Arch: "amd64"}, "ubuntu-24.04"},
+		{Target{OS: "linux", Arch: "arm64"}, "ubuntu-24.04-arm"},
+		{Target{OS: "windows", Arch: "386"}, "windows-2022"},
+		{Target{OS: "windows", Arch: "amd64"}, "windows-2022"},
+		{Target{OS: "windows", Arch: "arm64"}, "windows-11-arm"},
+	}
+	for _, test := range tests {
+		t.Run(test.target.Key(), func(t *testing.T) {
+			runner, err := RunnerForTarget(test.target)
+			if err != nil || runner != test.runner {
+				t.Fatalf("RunnerForTarget(%s) = %q, %v; want %q", test.target.Key(), runner, err, test.runner)
+			}
+		})
+	}
+	if _, err := RunnerForTarget(Target{OS: "darwin", Arch: "386"}); err == nil {
+		t.Fatal("RunnerForTarget(darwin/386) unexpectedly succeeded")
+	}
+}
+
+func TestLoadRejectsInvalidManifests(t *testing.T) {
+	baseWorkspace := t.TempDir()
+	writeCOFFObject(t, baseWorkspace, "test.o", 0x8664)
+	base := `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: test
+        object: test.o
+        expect: {success_only: true}
+`
+
+	tests := []struct {
+		name     string
+		manifest string
+		want     string
+	}{
+		{"unknown field", strings.Replace(base, "schema: sliver-bof-e2e/v1", "schema: sliver-bof-e2e/v1\nunknown: true", 1), "field unknown not found"},
+		{"unknown nested field", strings.Replace(base, "        expect:", "        mystery: true\n        expect:", 1), "field mystery not found"},
+		{"duplicate YAML key", strings.Replace(base, "        object: test.o", "        object: test.o\n        object: test.o", 1), "already defined"},
+		{"wrong schema", strings.Replace(base, SchemaV1, "sliver-bof-e2e/v2", 1), `schema must be "sliver-bof-e2e/v1"`},
+		{"bad version", strings.Replace(base, "master", "main", 1), "sliver.version"},
+		{"unsupported target", strings.Replace(base, "windows, arch: amd64", "darwin, arch: 386", 1), `unsupported target "darwin/386"`},
+		{"missing expectation", strings.Replace(base, "        expect: {success_only: true}\n", "", 1), ".expect must explicitly"},
+		{"success and output", strings.Replace(base, "expect: {success_only: true}", "expect: {success_only: true, output: {equals: ok}}", 1), "success_only cannot be true"},
+		{"empty output", strings.Replace(base, "expect: {success_only: true}", "expect: {output: {contains: []}}", 1), ".expect must explicitly"},
+		{"bad regexp", strings.Replace(base, "expect: {success_only: true}", "expect: {output: {matches: ['[']}}", 1), "not a valid Go regexp"},
+		{"bad executor", strings.Replace(base, "        expect:", "        bof_executor: auto\n        expect:", 1), ".bof_executor must be"},
+		{"duplicate mode", strings.Replace(base, "        expect:", "        modes: [session, session]\n        expect:", 1), "duplicate mode"},
+		{"repeat zero", strings.Replace(base, "        expect:", "        repeat: 0\n        expect:", 1), ".repeat must be"},
+		{"bad timeout", strings.Replace(base, "        expect:", "        command_timeout: forever\n        expect:", 1), ".command_timeout"},
+		{"duplicate test name", strings.Replace(base, "        expect: {success_only: true}\n", "        expect: {success_only: true}\n      - name: test\n        object: test.o\n        expect: {success_only: true}\n", 1), "duplicated in suite"},
+		{"object traversal", strings.Replace(base, "object: test.o", "object: ../test.o", 1), "escapes workspace"},
+		{"wrong extension", strings.Replace(base, "object: test.o", "object: test.obj", 1), "must have a .o extension"},
+		{"args and raw", strings.Replace(base, "        expect:", "        args: []\n        args_raw_base64: ''\n        expect:", 1), "cannot set both args and args_raw_base64"},
+		{"integer overflow", strings.Replace(base, "        expect:", "        args: [{type: int, value: 4294967296}]\n        expect:", 1), "unsigned 32-bit"},
+		{"integer string", strings.Replace(base, "        expect:", "        args: [{type: int, value: '1'}]\n        expect:", 1), "unsigned 32-bit"},
+		{"unsupported arg", strings.Replace(base, "        expect:", "        args: [{type: pointer, value: 1}]\n        expect:", 1), "is unsupported"},
+		{"invalid base64", strings.Replace(base, "        expect:", "        args_raw_base64: '*bad*'\n        expect:", 1), "must be canonical base64"},
+		{"second document", base + "---\n{}\n", "exactly one YAML document"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeManifest(t, baseWorkspace, test.manifest)
+			_, err := Load(path, baseWorkspace)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsCollectionErrors(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/a.o", 0x8664)
+	writeCOFFObject(t, workspace, "objects/one/same.o", 0x8664)
+	writeCOFFObject(t, workspace, "objects/two/same.o", 0x8664)
+	base := `
+schema: sliver-bof-e2e/v1
+sliver: {version: latest}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    collections:
+      - name: all
+        glob: objects/*.o
+        expect: {success_only: true}
+`
+	tests := []struct {
+		name, manifest, want string
+	}{
+		{"empty glob", strings.Replace(base, "objects/*.o", "missing/*.o", 1), "matched no files"},
+		{"absolute glob", strings.Replace(base, "objects/*.o", filepath.ToSlash(filepath.Join(workspace, "objects/*.o")), 1), "must be relative"},
+		{"traversal glob", strings.Replace(base, "objects/*.o", "../*.o", 1), "escapes workspace"},
+		{"duplicate basename", strings.Replace(base, "objects/*.o", "objects/*/*.o", 1), "duplicate basename"},
+		{"unknown override", strings.Replace(base, "        expect: {success_only: true}\n", "        expect: {success_only: true}\n        overrides:\n          missing.o: {repeat: 2}\n", 1), "does not match a collection object"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeManifest(t, workspace, test.manifest)
+			_, err := Load(path, workspace)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsSymlinkEscapes(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	writeCOFFObject(t, outside, "outside.o", 0x8664)
+	writeCOFFObject(t, workspace, "inside.o", 0x8664)
+	writeFile(t, outside, "outside.bin", []byte("secret"))
+	if err := os.Symlink(filepath.Join(outside, "outside.o"), filepath.Join(workspace, "escape.o")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	path := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: escape
+        object: escape.o
+        expect: {success_only: true}
+`)
+	_, err := Load(path, workspace)
+	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace") {
+		t.Fatalf("Load() error = %v, want symlink escape error", err)
+	}
+
+	if err := os.Symlink(filepath.Join(outside, "outside.bin"), filepath.Join(workspace, "escape.bin")); err != nil {
+		t.Fatalf("create file argument symlink: %v", err)
+	}
+	path = writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: escape
+        object: inside.o
+        args:
+          - {type: file, value: escape.bin}
+        expect: {success_only: true}
+`)
+	_, err = Load(path, workspace)
+	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace") {
+		t.Fatalf("Load() file argument error = %v, want symlink escape error", err)
+	}
+}
+
+func TestLoadRejectsObjectArchitectureMismatch(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "arm64.o", 0xaa64)
+	path := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: mismatch
+        object: arm64.o
+        expect: {success_only: true}
+`)
+	_, err := Load(path, workspace)
+	if err == nil || !strings.Contains(err.Error(), "COFF machine") {
+		t.Fatalf("Load() error = %v, want COFF architecture mismatch", err)
+	}
+}
+
+func TestSchemaFileIsValidJSON(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "schema", "sliver-bof-e2e-v1.schema.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(schema) error = %v", err)
+	}
+	var value any
+	if err := json.Unmarshal(contents, &value); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+}
+
+func writeManifest(t *testing.T, workspace, contents string) string {
+	t.Helper()
+	path := filepath.Join(workspace, strings.ReplaceAll(t.Name(), "/", "-")+"-manifest.yml")
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(manifest) error = %v", err)
+	}
+	return path
+}
+
+func writeFile(t *testing.T, workspace, relative string, contents []byte) string {
+	t.Helper()
+	path := filepath.Join(workspace, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", path, err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func writeCOFFObject(t *testing.T, workspace, relative string, machine uint16) string {
+	t.Helper()
+	header := make([]byte, 96)
+	binary.LittleEndian.PutUint16(header[0:2], machine)
+	return writeFile(t, workspace, relative, header)
+}
+
+func canonical(t *testing.T, path string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", path, err)
+	}
+	abs, err := filepath.Abs(real)
+	if err != nil {
+		t.Fatalf("Abs(%q) error = %v", real, err)
+	}
+	return filepath.Clean(abs)
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func ExampleManifest_Matrix() {
+	loaded := &Manifest{Plans: []Plan{{Target: Target{OS: "windows", Arch: "amd64"}}}}
+	encoded, _ := json.Marshal(loaded.Matrix())
+	fmt.Println(string(encoded))
+	// Output: {"include":[{"target":"windows/amd64","runner":"windows-2022","key":"windows-amd64"}]}
+}

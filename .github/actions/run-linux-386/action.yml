@@ -1,0 +1,46 @@
+name: Run one Linux/386 Sliver BOF target
+description: Run a Linux/386 target inside a complete 32-bit Debian userspace.
+
+inputs:
+  manifest:
+    description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-bof-e2e.yml
+  target:
+    description: Manifest target. This action accepts only linux/386.
+    required: true
+  sliver-version:
+    description: Immutable Sliver selector emitted by the planner.
+    required: true
+  results-dir:
+    description: Directory for this target's result files.
+    required: true
+  github-token:
+    description: Optional GitHub token used only during Sliver acquisition.
+    required: false
+  action-version:
+    description: Immutable action/workflow identity recorded in the report.
+    required: true
+
+outputs:
+  results-dir:
+    description: Absolute results directory.
+    value: ${{ steps.run.outputs.results-dir }}
+  resolved-sliver:
+    description: Immutable Sliver selector actually tested.
+    value: ${{ steps.run.outputs.resolved-sliver }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run in Linux/386 userspace
+      id: run
+      shell: bash
+      env:
+        SLIVER_BOF_MANIFEST: ${{ inputs.manifest }}
+        SLIVER_BOF_TARGET: ${{ inputs.target }}
+        SLIVER_BOF_SLIVER_VERSION: ${{ inputs.sliver-version }}
+        SLIVER_BOF_RESULTS_DIR: ${{ inputs.results-dir }}
+        SLIVER_BOF_GITHUB_TOKEN: ${{ inputs.github-token }}
+        SLIVER_BOF_ACTION_VERSION: ${{ inputs.action-version }}
+      run: bash "${GITHUB_ACTION_PATH}/run.sh"

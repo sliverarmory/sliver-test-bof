@@ -1,0 +1,165 @@
+name: Sliver BOF end-to-end tests
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: Path to the sliver-bof-e2e/v1 manifest in the caller repository.
+        required: false
+        type: string
+        default: .github/sliver-bof-e2e.yml
+      sliver-version:
+        description: Optional Sliver selector override (master, latest, vX.Y.Z, or a full commit SHA). Empty uses the manifest.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      github-token:
+        description: Optional token used to resolve and acquire Sliver.
+        required: false
+    outputs:
+      resolved-sliver:
+        description: Immutable Sliver selector tested by every target job.
+        value: ${{ jobs.plan.outputs.resolved-sliver }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan target matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      resolved-sliver: ${{ steps.plan.outputs.resolved-sliver }}
+    steps:
+      - name: Check out BOF repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.26.6
+          cache: false
+
+      - name: Validate manifest and plan matrix
+        id: plan
+        uses: $/.github/actions/plan
+        with:
+          manifest: ${{ inputs.manifest }}
+          sliver-version: ${{ inputs.sliver-version }}
+          results-dir: ${{ runner.temp }}/sliver-bof-e2e-plan
+          github-token: ${{ secrets['github-token'] || github.token }}
+
+  run:
+    name: ${{ matrix.target }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Check out BOF repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        if: ${{ matrix.target != 'linux/386' }}
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.26.6
+          cache: false
+
+      - name: Set up QEMU for Linux 386
+        if: ${{ matrix.target == 'linux/386' }}
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: i386
+
+      - name: Set up Docker Buildx for Linux 386
+        if: ${{ matrix.target == 'linux/386' }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Run Sliver BOF tests
+        if: ${{ matrix.target != 'linux/386' }}
+        id: test
+        uses: $/.github/actions/run
+        with:
+          manifest: ${{ inputs.manifest }}
+          target: ${{ matrix.target }}
+          sliver-version: ${{ needs.plan.outputs.resolved-sliver }}
+          results-dir: ${{ runner.temp }}/sliver-bof-e2e-results/${{ matrix.key }}
+          github-token: ${{ secrets['github-token'] || github.token }}
+          action-version: ${{ job.workflow_repository }}@${{ job.workflow_sha }}
+
+      - name: Run Sliver BOF tests in a Linux/386 userspace
+        if: ${{ matrix.target == 'linux/386' }}
+        id: test-linux-386
+        uses: $/.github/actions/run-linux-386
+        with:
+          manifest: ${{ inputs.manifest }}
+          target: ${{ matrix.target }}
+          sliver-version: ${{ needs.plan.outputs.resolved-sliver }}
+          results-dir: ${{ runner.temp }}/sliver-bof-e2e-results/${{ matrix.key }}
+          github-token: ${{ secrets['github-token'] || github.token }}
+          action-version: ${{ job.workflow_repository }}@${{ job.workflow_sha }}
+
+      - name: Upload ${{ matrix.target }} results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sliver-bof-target-${{ matrix.key }}
+          path: ${{ runner.temp }}/sliver-bof-e2e-results/${{ matrix.key }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  aggregate:
+    name: Aggregate results
+    if: ${{ always() }}
+    needs:
+      - plan
+      - run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out BOF repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.26.6
+          cache: false
+
+      - name: Download target results
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sliver-bof-target-*
+          path: ${{ runner.temp }}/sliver-bof-e2e-aggregate
+
+      - name: Aggregate and verify results
+        if: ${{ always() }}
+        uses: $/.github/actions/aggregate
+        with:
+          manifest: ${{ inputs.manifest }}
+          results-dir: ${{ runner.temp }}/sliver-bof-e2e-aggregate
+
+      - name: Upload aggregate results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sliver-bof-e2e-results
+          path: ${{ runner.temp }}/sliver-bof-e2e-aggregate
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true

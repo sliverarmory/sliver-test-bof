@@ -1,0 +1,24 @@
+name: Aggregate Sliver BOF end-to-end results
+description: Combine per-target JSON and JUnit results and enforce full matrix completion.
+
+inputs:
+  manifest:
+    description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-bof-e2e.yml
+  results-dir:
+    description: Directory containing downloaded per-target result files.
+    required: false
+    default: .sliver-bof-e2e/results
+  mode:
+    description: Internal mode override.
+    required: false
+    default: aggregate
+
+outputs:
+  results-dir:
+    description: Absolute directory containing the aggregate outputs.
+
+runs:
+  using: node24
+  main: ../../../dist/index.js

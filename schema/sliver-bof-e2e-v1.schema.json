@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sliverarmory/sliver-test-bof/schema/sliver-bof-e2e-v1.schema.json",
+  "title": "Sliver BOF end-to-end manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sliver", "suites"],
+  "properties": {
+    "schema": { "const": "sliver-bof-e2e/v1" },
+    "sliver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "anyOf": [
+            { "enum": ["latest", "master"] },
+            { "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+            { "pattern": "^[0-9a-fA-F]{40}$" }
+          ]
+        }
+      }
+    },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "suites": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/suite" }
+    }
+  },
+  "$defs": {
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bof_executor": { "$ref": "#/$defs/executor" },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "modes": { "$ref": "#/$defs/modes" },
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "command_timeout": { "type": "string", "minLength": 1 }
+      }
+    },
+    "executor": { "enum": ["reflektor", "coff-loader"] },
+    "modes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["session", "beacon"] }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch"],
+      "properties": {
+        "os": { "enum": ["darwin", "linux", "windows"] },
+        "arch": { "enum": ["386", "amd64", "arm64"] }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "os": { "const": "darwin" },
+            "arch": { "enum": ["amd64", "arm64"] }
+          }
+        },
+        {
+          "properties": {
+            "os": { "const": "linux" },
+            "arch": { "enum": ["386", "amd64", "arm64"] }
+          }
+        },
+        {
+          "properties": {
+            "os": { "const": "windows" },
+            "arch": { "enum": ["386", "amd64", "arm64"] }
+          }
+        }
+      ]
+    },
+    "argument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "enum": ["int", "integer", "short", "string", "wstring", "file", "bytes_base64"] },
+        "value": {}
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["int", "integer"] } } },
+          "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 4294967295 } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "short" } } },
+          "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 65535 } } }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["string", "wstring", "file", "bytes_base64"] } } },
+          "then": { "properties": { "value": { "type": "string" } } }
+        }
+      ]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "equals": { "type": "string" },
+        "contains": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "not_contains": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "matches": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "equals_base64": { "type": "string" }
+      },
+      "not": { "required": ["equals", "equals_base64"] }
+    },
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "success_only": { "type": "boolean" },
+        "output": { "$ref": "#/$defs/output" }
+      },
+      "oneOf": [
+        {
+          "required": ["success_only"],
+          "properties": { "success_only": { "const": true } },
+          "not": { "required": ["output"] }
+        },
+        {
+          "required": ["output"],
+          "properties": { "success_only": { "const": false } }
+        }
+      ]
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "object", "expect"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "object": { "type": "string", "pattern": "\\.o$" },
+        "bof_executor": { "$ref": "#/$defs/executor" },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "modes": { "$ref": "#/$defs/modes" },
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "command_timeout": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
+        "args_raw_base64": { "type": "string" },
+        "expect": { "$ref": "#/$defs/expect" }
+      },
+      "not": { "required": ["args", "args_raw_base64"] }
+    },
+    "override": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bof_executor": { "$ref": "#/$defs/executor" },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "modes": { "$ref": "#/$defs/modes" },
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "command_timeout": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
+        "args_raw_base64": { "type": "string" },
+        "expect": { "$ref": "#/$defs/expect" }
+      },
+      "not": { "required": ["args", "args_raw_base64"] }
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "glob", "expect"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "glob": { "type": "string", "minLength": 1 },
+        "bof_executor": { "$ref": "#/$defs/executor" },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "modes": { "$ref": "#/$defs/modes" },
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "command_timeout": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
+        "args_raw_base64": { "type": "string" },
+        "expect": { "$ref": "#/$defs/expect" },
+        "overrides": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/override" }
+        }
+      },
+      "not": { "required": ["args", "args_raw_base64"] }
+    },
+    "suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "target": { "$ref": "#/$defs/target" },
+        "tests": { "type": "array", "items": { "$ref": "#/$defs/test" } },
+        "collections": { "type": "array", "items": { "$ref": "#/$defs/collection" } }
+      },
+      "anyOf": [
+        { "required": ["tests"], "properties": { "tests": { "minItems": 1 } } },
+        { "required": ["collections"], "properties": { "collections": { "minItems": 1 } } }
+      ]
+    }
+  }
+}

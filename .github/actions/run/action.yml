@@ -1,0 +1,80 @@
+name: Run one Sliver BOF end-to-end target
+description: Run all cases for one os/arch target from a validated manifest.
+
+inputs:
+  manifest:
+    description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-bof-e2e.yml
+  target:
+    description: Manifest target to run, formatted as os/arch. Optional for a single-target manifest.
+    required: false
+  sliver-version:
+    description: Optional Sliver selector override. Defaults to manifest sliver.version; reusable workflows pass the immutable plan result.
+    required: false
+  sliver-server-path:
+    description: Optional path to an existing sliver-server binary.
+    required: false
+  results-dir:
+    description: Directory for this target's result files.
+    required: false
+    default: .sliver-bof-e2e/results
+  github-token:
+    description: Optional GitHub token used only by the isolated acquisition phase.
+    required: false
+  action-version:
+    description: Immutable action/workflow identity recorded in the report. Reusable workflows should pass repository@workflow commit SHA.
+    required: false
+outputs:
+  results-dir:
+    description: Absolute results directory.
+    value: ${{ steps.prepare.outputs.results-dir }}
+  resolved-sliver:
+    description: Immutable Sliver selector actually tested.
+    value: ${{ steps.prepare.outputs.resolved-sliver }}
+
+runs:
+  using: composite
+  steps:
+    - name: Acquire Sliver and prepare the controller
+      id: prepare
+      uses: $/.github/actions/prepare
+      with:
+        manifest: ${{ inputs.manifest }}
+        target: ${{ inputs.target }}
+        sliver-version: ${{ inputs.sliver-version }}
+        sliver-server-path: ${{ inputs.sliver-server-path }}
+        results-dir: ${{ inputs.results-dir }}
+        github-token: ${{ inputs.github-token }}
+        action-version: ${{ inputs.action-version }}
+
+    - name: Run BOFs in the credential-free phase
+      id: execute
+      shell: bash
+      env:
+        GITHUB_TOKEN: ''
+        ACTIONS_RUNTIME_TOKEN: ''
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+        SLIVER_BOF_ACTION_ROOT: ${{ steps.prepare.outputs.action-root }}
+        SLIVER_BOF_CONTROLLER: ${{ steps.prepare.outputs.controller }}
+        SLIVER_BOF_MANIFEST: ${{ inputs.manifest }}
+        SLIVER_BOF_TARGET: ${{ steps.prepare.outputs.target }}
+        SLIVER_BOF_SLIVER_VERSION: ${{ inputs.sliver-version }}
+        SLIVER_BOF_RESULTS_DIR: ${{ steps.prepare.outputs.results-dir }}
+        SLIVER_BOF_ACTION_VERSION: ${{ steps.prepare.outputs.action-version }}
+        SLIVER_BOF_PREPARED_FILE: ${{ steps.prepare.outputs.prepared-file }}
+        SLIVER_BOF_STATE_FILE: ${{ steps.prepare.outputs.state-file }}
+      run: bash "${SLIVER_BOF_ACTION_ROOT}/dist/run-prepared.sh"
+
+    - name: Clean up Sliver processes and private state
+      if: ${{ always() }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ''
+        ACTIONS_RUNTIME_TOKEN: ''
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+        SLIVER_BOF_ACTION_ROOT: ${{ steps.prepare.outputs.action-root }}
+        SLIVER_BOF_NODE: ${{ steps.prepare.outputs.node }}
+        SLIVER_BOF_PREPARED_DIR: ${{ steps.prepare.outputs.prepared-dir }}
+        SLIVER_BOF_STATE_FILE: ${{ steps.prepare.outputs.state-file }}
+      run: bash "${SLIVER_BOF_ACTION_ROOT}/dist/cleanup.sh"
