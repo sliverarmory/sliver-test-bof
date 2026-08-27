@@ -205,7 +205,7 @@ func (r *Report) Markdown() string {
 			fmt.Fprintf(&builder, "\n`%s`: %s\n", escapeCell(caseDisplayName(result)), html.EscapeString(result.Error))
 		}
 	}
-	return builder.String()
+	return strings.ToValidUTF8(builder.String(), "\uFFFD")
 }
 
 func caseDisplayName(result CaseResult) string {

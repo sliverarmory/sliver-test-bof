@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestReportAddAndFailed(t *testing.T) {
@@ -172,6 +173,65 @@ func TestMarkdownEscapesTableCellsAndInfrastructureError(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("Markdown missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+func TestReportWriteNormalizesInvalidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	invalid := "before" + string([]byte{0xff}) + "<after>&"
+	report := &Report{
+		Schema:              Schema,
+		Target:              "windows/386",
+		InfrastructureError: invalid,
+		Cases: []CaseResult{{
+			Suite: "suite", Test: "test", Mode: "session", Executor: "reflektor",
+			Repeat: 1, Status: "fail", Stage: "execute", Error: invalid,
+		}},
+	}
+	if err := report.Write(dir); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	jsonData := readFile(t, filepath.Join(dir, "report.json"))
+	junitData := readFile(t, filepath.Join(dir, "junit.xml"))
+	markdownData := readFile(t, filepath.Join(dir, "summary.md"))
+	for name, data := range map[string][]byte{
+		"report.json": jsonData,
+		"junit.xml":   junitData,
+		"summary.md":  markdownData,
+	} {
+		if !utf8.Valid(data) {
+			t.Errorf("%s is not valid UTF-8", name)
+		}
+		if strings.IndexByte(string(data), 0xff) >= 0 {
+			t.Errorf("%s contains the invalid source byte", name)
+		}
+	}
+
+	var decoded Report
+	if err := json.Unmarshal(jsonData, &decoded); err != nil {
+		t.Fatalf("decode report.json: %v", err)
+	}
+	if !strings.Contains(decoded.InfrastructureError, "\uFFFD") || !strings.Contains(decoded.Cases[0].Error, "\uFFFD") {
+		t.Fatalf("report.json did not normalize invalid UTF-8: %#v", decoded)
+	}
+
+	var junit parsedJUnitSuite
+	if err := xml.Unmarshal(junitData, &junit); err != nil {
+		t.Fatalf("decode junit.xml: %v", err)
+	}
+	if len(junit.Cases) != 2 || junit.Cases[0].Failure == nil || junit.Cases[1].Failure == nil {
+		t.Fatalf("JUnit cases = %#v", junit.Cases)
+	}
+	if !strings.Contains(junit.Cases[0].Failure.Body, "\uFFFD") || !strings.Contains(junit.Cases[1].Failure.Body, "\uFFFD") {
+		t.Fatalf("junit.xml did not normalize invalid UTF-8: %#v", junit.Cases)
+	}
+
+	markdown := string(markdownData)
+	for _, want := range []string{"before\uFFFD&lt;after&gt;&amp;", "Infrastructure failure:"} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("summary.md missing %q:\n%s", want, markdown)
 		}
 	}
 }

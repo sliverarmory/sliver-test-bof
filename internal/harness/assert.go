@@ -28,14 +28,14 @@ func AssertOutput(output []byte, expectation Expectation) error {
 			return fmt.Errorf("binary output mismatch: got %d bytes, want %d", len(output), len(want))
 		}
 	}
-	needsText := match.Equals != nil || len(match.Contains) != 0 || len(match.NotContains) != 0 || len(match.Matches) != 0
-	if !needsText {
-		return nil
+	needsUTF8 := match.Equals != nil || len(match.Matches) != 0
+	var text string
+	if needsUTF8 {
+		if !utf8.Valid(output) {
+			return fmt.Errorf("output is not valid UTF-8; use sha256 or equals_base64")
+		}
+		text = string(output)
 	}
-	if !utf8.Valid(output) {
-		return fmt.Errorf("output is not valid UTF-8; use sha256 or equals_base64")
-	}
-	text := string(output)
 	if match.Equals != nil && text != *match.Equals {
 		return fmt.Errorf("output did not equal expected text (got %d bytes, want %d)", len(output), len(*match.Equals))
 	}

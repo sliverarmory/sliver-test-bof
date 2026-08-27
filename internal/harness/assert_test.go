@@ -10,9 +10,56 @@ func TestAssertOutputTextMatchers(t *testing.T) {
 	}
 }
 
-func TestAssertOutputRejectsInvalidUTF8ForText(t *testing.T) {
-	if err := AssertOutput([]byte{0xff}, Expectation{Output: OutputExpectation{Contains: []string{"x"}}}); err == nil {
-		t.Fatal("expected invalid UTF-8 error")
+func TestAssertOutputContainsMatchesBytesInInvalidUTF8(t *testing.T) {
+	output := append([]byte("Printing modules of process ID: 1234\nMicrosoft"), 0xae)
+	output = append(output, []byte(" C Runtime Library\ncaf\u00e9")...)
+
+	if err := AssertOutput(output, Expectation{Output: OutputExpectation{
+		Contains: []string{"Printing modules of process ID:", "C Runtime Library", "caf\u00e9"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAssertOutputContainsReportsAbsentNeedleInInvalidUTF8(t *testing.T) {
+	output := []byte{'p', 'r', 'e', 's', 'e', 'n', 't', 0xff}
+	err := AssertOutput(output, Expectation{Output: OutputExpectation{Contains: []string{"missing"}}})
+	if err == nil || err.Error() != `output does not contain "missing"` {
+		t.Fatalf("AssertOutput() error = %v, want absent-needle failure", err)
+	}
+}
+
+func TestAssertOutputContainsRequiresEveryNeedle(t *testing.T) {
+	output := []byte{'a', 'l', 'p', 'h', 'a', 0xff, 'o', 'm', 'e', 'g', 'a'}
+	err := AssertOutput(output, Expectation{Output: OutputExpectation{
+		Contains: []string{"alpha", "missing", "omega"},
+	}})
+	if err == nil || err.Error() != `output does not contain "missing"` {
+		t.Fatalf("AssertOutput() error = %v, want failure for the first absent needle", err)
+	}
+}
+
+func TestAssertOutputNotContainsMatchesBytesInInvalidUTF8(t *testing.T) {
+	output := []byte{'a', 'l', 'p', 'h', 'a', 0xff, 'o', 'm', 'e', 'g', 'a'}
+	if err := AssertOutput(output, Expectation{Output: OutputExpectation{
+		NotContains: []string{"missing"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	err := AssertOutput(output, Expectation{Output: OutputExpectation{
+		NotContains: []string{"omega"},
+	}})
+	if err == nil || err.Error() != `output unexpectedly contains "omega"` {
+		t.Fatalf("AssertOutput() error = %v, want present-needle failure", err)
+	}
+}
+
+func TestAssertOutputRegexRejectsInvalidUTF8(t *testing.T) {
+	err := AssertOutput([]byte{'a', 'l', 'p', 'h', 'a', 0xff}, Expectation{Output: OutputExpectation{
+		Matches: []string{"alpha"},
+	}})
+	if err == nil || err.Error() != "output is not valid UTF-8; use sha256 or equals_base64" {
+		t.Fatalf("AssertOutput() error = %v, want invalid UTF-8 failure", err)
 	}
 }
 

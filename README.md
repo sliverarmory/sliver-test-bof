@@ -217,6 +217,8 @@ This fixture makes deterministic local `OPEN` assertions possible; it does not p
 
 Use `expect.success_only: true` when the BOF has no stable content to assert. Otherwise at least one content assertion is required. Current Sliver Reflektor responses concatenate output records into one byte buffer, so assertions apply to that complete raw buffer rather than separate stdout and stderr streams.
 
+`contains` and `not_contains` compare each manifest string's UTF-8 byte sequence directly against that raw buffer, so unrelated non-UTF-8 bytes do not prevent literal matching. `equals` and `matches` require the complete output to be valid UTF-8; use `equals_base64` or `sha256` for exact binary assertions.
+
 ## Executor selection
 
 Executor selection is explicit per default, collection, or test. The action does not silently fall back between routes.
