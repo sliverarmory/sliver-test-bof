@@ -22,6 +22,7 @@
         }
       }
     },
+    "fixtures": { "$ref": "#/$defs/fixtures" },
     "defaults": { "$ref": "#/$defs/defaults" },
     "suites": {
       "type": "array",
@@ -30,6 +31,42 @@
     }
   },
   "$defs": {
+    "fixtureVariable": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "fixtures": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "file": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variable", "contents_utf8"],
+          "properties": {
+            "variable": { "$ref": "#/$defs/fixtureVariable" },
+            "contents_utf8": { "type": "string", "maxLength": 1048576 }
+          }
+        },
+        "directory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variable"],
+          "properties": {
+            "variable": { "$ref": "#/$defs/fixtureVariable" },
+            "files": {
+              "type": "object",
+              "maxProperties": 256,
+              "propertyNames": {
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:<>\"|?*\\u0000-\\u001F\\u007F])(?!.*[. ](?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^/]+(?:/[^/]+)*$"
+              },
+              "additionalProperties": { "type": "string", "maxLength": 1048576 }
+            }
+          }
+        }
+      }
+    },
     "defaults": {
       "type": "object",
       "additionalProperties": false,
@@ -133,13 +170,21 @@
         }
       ]
     },
+    "tcpListener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port_argument"],
+      "properties": {
+        "port_argument": { "type": "integer", "minimum": 0, "maximum": 1023 }
+      }
+    },
     "test": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "object", "expect"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "object": { "type": "string", "pattern": "\\.o$" },
+        "object": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).*\\.o$" },
         "bof_executor": { "$ref": "#/$defs/executor" },
         "entrypoint": { "type": "string", "minLength": 1 },
         "modes": { "$ref": "#/$defs/modes" },
@@ -147,9 +192,19 @@
         "command_timeout": { "type": "string", "minLength": 1 },
         "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
         "args_raw_base64": { "type": "string" },
+        "tcp_listener": { "$ref": "#/$defs/tcpListener" },
         "expect": { "$ref": "#/$defs/expect" }
       },
-      "not": { "required": ["args", "args_raw_base64"] }
+      "allOf": [
+        { "not": { "required": ["args", "args_raw_base64"] } },
+        {
+          "if": { "required": ["tcp_listener"] },
+          "then": {
+            "required": ["args"],
+            "not": { "required": ["args_raw_base64"] }
+          }
+        }
+      ]
     },
     "override": {
       "type": "object",
@@ -162,9 +217,18 @@
         "command_timeout": { "type": "string", "minLength": 1 },
         "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
         "args_raw_base64": { "type": "string" },
+        "tcp_listener": { "$ref": "#/$defs/tcpListener" },
         "expect": { "$ref": "#/$defs/expect" }
       },
-      "not": { "required": ["args", "args_raw_base64"] }
+      "allOf": [
+        { "not": { "required": ["args", "args_raw_base64"] } },
+        {
+          "if": { "required": ["tcp_listener"] },
+          "then": {
+            "not": { "required": ["args_raw_base64"] }
+          }
+        }
+      ]
     },
     "collection": {
       "type": "object",
@@ -180,13 +244,38 @@
         "command_timeout": { "type": "string", "minLength": 1 },
         "args": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/argument" } },
         "args_raw_base64": { "type": "string" },
+        "tcp_listener": { "$ref": "#/$defs/tcpListener" },
         "expect": { "$ref": "#/$defs/expect" },
         "overrides": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/override" }
         }
       },
-      "not": { "required": ["args", "args_raw_base64"] }
+      "allOf": [
+        { "not": { "required": ["args", "args_raw_base64"] } },
+        {
+          "if": { "required": ["tcp_listener"] },
+          "then": {
+            "required": ["args"],
+            "not": { "required": ["args_raw_base64"] }
+          }
+        },
+        {
+          "if": { "required": ["tcp_listener"] },
+          "then": {
+            "properties": {
+              "overrides": {
+                "additionalProperties": {
+                  "allOf": [
+                    { "$ref": "#/$defs/override" },
+                    { "not": { "required": ["args_raw_base64"] } }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "suite": {
       "type": "object",

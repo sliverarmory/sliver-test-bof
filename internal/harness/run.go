@@ -385,6 +385,11 @@ func (runner *runtimeHarness) runCase(testCase Case, implant generatedImplant, c
 			return
 		}
 	}
+	fixtureVariables, err := prepareFixtures(filepath.Join(caseRoot, "fixtures"), runner.opts.Fixtures)
+	if err != nil {
+		runner.addFailure(testCase, implant.mode, 1, "prepare-fixtures", err, "")
+		return
+	}
 	logPath := filepath.Join(runner.opts.ResultsDir, "logs", artifactKey+"-"+implant.mode+".log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		runner.addFailure(testCase, implant.mode, 1, "prepare-implant", err, "")
@@ -429,11 +434,37 @@ func (runner *runtimeHarness) runCase(testCase Case, implant generatedImplant, c
 		runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
 		return
 	}
+	arguments, err := substituteFixtureArguments(testCase.Arguments, fixtureVariables)
+	if err != nil {
+		runner.addFailure(testCase, implant.mode, 1, "prepare-fixtures", err, logPath)
+		runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
+		return
+	}
+	var tcpFixture *loopbackTCPFixture
+	if testCase.TCPListener != nil {
+		tcpFixture, err = startLoopbackTCPFixture()
+		if err != nil {
+			runner.addFailure(testCase, implant.mode, 1, "prepare-tcp-listener", err, logPath)
+			runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
+			return
+		}
+		defer func() {
+			if err := tcpFixture.Close(); err != nil {
+				runner.addFailure(testCase, implant.mode, 0, "cleanup-tcp-listener", err, logPath)
+			}
+		}()
+		arguments, err = applyTCPListenerArgument(arguments, testCase.TCPListener, tcpFixture.Port())
+		if err != nil {
+			runner.addFailure(testCase, implant.mode, 1, "prepare-tcp-listener", err, logPath)
+			runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
+			return
+		}
+	}
 	rawArguments := testCase.RawArguments
 	if testCase.HasRawArguments && rawArguments == nil {
 		rawArguments = []byte{}
 	}
-	inner, err := PackArguments(testCase.Arguments, rawArguments)
+	inner, err := PackArguments(arguments, rawArguments)
 	if err != nil {
 		runner.addFailure(testCase, implant.mode, 1, "pack-arguments", err, logPath)
 		runner.recordProcessCleanup(testCase, implant.mode, process, logPath)

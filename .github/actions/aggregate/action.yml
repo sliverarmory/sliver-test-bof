@@ -6,6 +6,9 @@ inputs:
     description: Path to the sliver-bof-e2e/v1 manifest, relative to the caller workspace.
     required: false
     default: .github/sliver-bof-e2e.yml
+  object-root:
+    description: Optional private root containing only planner-staged BOF objects.
+    required: false
   results-dir:
     description: Directory containing downloaded per-target result files.
     required: false

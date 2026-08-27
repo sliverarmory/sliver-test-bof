@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -147,6 +148,156 @@ func TestMatrixUsesUniqueDeterministicTargetOrder(t *testing.T) {
 	}
 	if !equalStrings(got, want) {
 		t.Fatalf("Matrix order = %v, want %v", got, want)
+	}
+}
+
+func TestLoadNormalizesFixturesAndTCPListener(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "probe.o", 0x8664)
+	manifestPath := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+fixtures:
+  file:
+    variable: FIXTURE_FILE
+    contents_utf8: "fixture contents\n"
+  directory:
+    variable: FIXTURE_DIR
+    files:
+      marker.txt: "directory contents\n"
+      nested/child.txt: child
+suites:
+  - name: windows-amd64
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: probe
+        object: probe.o
+        args:
+          - {type: string, value: '${FIXTURE_FILE}'}
+          - {type: wstring, value: '${FIXTURE_DIR}'}
+          - {type: int, value: 1}
+        tcp_listener: {port_argument: 2}
+        expect: {success_only: true}
+`)
+	loaded, err := Load(manifestPath, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Config.Fixtures.File == nil || loaded.Config.Fixtures.File.Variable != "FIXTURE_FILE" || loaded.Config.Fixtures.File.ContentsUTF8 != "fixture contents\n" {
+		t.Fatalf("file fixture = %#v", loaded.Config.Fixtures.File)
+	}
+	if loaded.Config.Fixtures.Directory == nil || loaded.Config.Fixtures.Directory.Variable != "FIXTURE_DIR" || loaded.Config.Fixtures.Directory.Files["nested/child.txt"] != "child" {
+		t.Fatalf("directory fixture = %#v", loaded.Config.Fixtures.Directory)
+	}
+	settings := loaded.Plans[0].Settings
+	if settings.Args[0].String != "${FIXTURE_FILE}" || settings.Args[1].String != "${FIXTURE_DIR}" {
+		t.Fatalf("fixture arguments = %#v", settings.Args)
+	}
+	if settings.TCPListener == nil || settings.TCPListener.PortArgument != 2 {
+		t.Fatalf("TCP listener = %#v", settings.TCPListener)
+	}
+	if loaded.Plans[0].ObjectPath != "probe.o" {
+		t.Fatalf("ObjectPath = %q, want probe.o", loaded.Plans[0].ObjectPath)
+	}
+}
+
+func TestLoadRejectsUnsafeFixturesAndTCPListeners(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "test.o", 0x8664)
+	base := `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+fixtures:
+  file: {variable: FIXTURE_FILE, contents_utf8: fixture}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: test
+        object: test.o
+        args:
+          - {type: string, value: '${FIXTURE_FILE}'}
+          - {type: int, value: 1}
+        expect: {success_only: true}
+`
+	tests := []struct {
+		name, manifest, want string
+	}{
+		{"unknown variable", strings.Replace(base, "${FIXTURE_FILE}", "${UNKNOWN}", 1), "unknown fixture variable"},
+		{"partial substitution", strings.Replace(base, "${FIXTURE_FILE}", "prefix-${FIXTURE_FILE}", 1), "must be the entire value"},
+		{"missing file contents", strings.Replace(base, ", contents_utf8: fixture", "", 1), "contents_utf8 is required"},
+		{"null file contents", strings.Replace(base, "contents_utf8: fixture", "contents_utf8: null", 1), "contents_utf8 is required"},
+		{"duplicate variable", strings.Replace(base, "suites:", "  directory: {variable: FIXTURE_FILE, files: {}}\nsuites:", 1), "is duplicated"},
+		{"invalid variable", strings.Replace(base, "FIXTURE_FILE", "fixture-file", 1), "must match"},
+		{"directory traversal", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {'../escape.txt': value}\nsuites:", 1), "clean relative path"},
+		{"directory backslash", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {'dir\\\\escape.txt': value}\nsuites:", 1), "not portable"},
+		{"directory wildcard", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {'bad?.txt': value}\nsuites:", 1), "not portable"},
+		{"directory case collision", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {Marker.txt: one, marker.txt: two}\nsuites:", 1), "case-insensitive filesystems"},
+		{"directory prefix collision", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {parent: one, parent/child.txt: two}\nsuites:", 1), "prefix collision"},
+		{"directory reserved name", strings.Replace(base, "suites:", "  directory:\n    variable: FIXTURE_DIR\n    files: {CON.txt: value}\nsuites:", 1), "Windows-reserved"},
+		{"TCP index", strings.Replace(base, "        expect:", "        tcp_listener: {port_argument: 2}\n        expect:", 1), "must index args"},
+		{"TCP missing port argument", strings.Replace(base, "        expect:", "        tcp_listener: {}\n        expect:", 1), "port_argument is required"},
+		{"TCP null port argument", strings.Replace(base, "        expect:", "        tcp_listener: {port_argument: null}\n        expect:", 1), "port_argument is required"},
+		{"TCP string type", strings.Replace(base, "        expect:", "        tcp_listener: {port_argument: 0}\n        expect:", 1), "must be int"},
+		{"TCP raw args", strings.Replace(strings.Replace(base, "        args:\n          - {type: string, value: '${FIXTURE_FILE}'}\n          - {type: int, value: 1}\n", "        args_raw_base64: ''\n", 1), "        expect:", "        tcp_listener: {port_argument: 0}\n        expect:", 1), "cannot be used with args_raw_base64"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeManifest(t, workspace, test.manifest)
+			_, err := Load(path, workspace)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestTCPListenerCollectionOverrideInheritance(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/probe.o", 0x8664)
+	valid := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    collections:
+      - name: probes
+        glob: objects/*.o
+        args:
+          - {type: int, value: 1}
+        expect: {success_only: true}
+        overrides:
+          probe.o:
+            tcp_listener: {port_argument: 0}
+`)
+	loaded, err := Load(valid, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Plans[0].Settings.TCPListener == nil || loaded.Plans[0].Settings.TCPListener.PortArgument != 0 {
+		t.Fatalf("inherited TCP listener settings = %#v", loaded.Plans[0].Settings)
+	}
+
+	invalid := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    collections:
+      - name: probes
+        glob: objects/*.o
+        args:
+          - {type: int, value: 1}
+        tcp_listener: {port_argument: 0}
+        expect: {success_only: true}
+        overrides:
+          probe.o:
+            args_raw_base64: ''
+`)
+	if _, err := Load(invalid, workspace); err == nil || !strings.Contains(err.Error(), "cannot be used with args_raw_base64") {
+		t.Fatalf("inherited TCP listener raw-argument error = %v", err)
 	}
 }
 
@@ -313,6 +464,96 @@ suites:
 	_, err = Load(path, workspace)
 	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace") {
 		t.Fatalf("Load() file argument error = %v, want symlink escape error", err)
+	}
+}
+
+func TestPlannerRejectsButDirectLoadAllowsConfinedObjectSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated Windows privileges")
+	}
+	workspace := t.TempDir()
+	realObject := writeCOFFObject(t, workspace, "objects/real.o", 0x8664)
+	if err := os.Symlink(realObject, filepath.Join(workspace, "objects", "link.o")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	manifestPath := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: link
+        object: objects/link.o
+        expect: {success_only: true}
+`)
+	if _, err := Load(manifestPath, workspace); err != nil {
+		t.Fatalf("direct Load() rejected confined object symlink: %v", err)
+	}
+	if _, err := LoadForPlanning(manifestPath, workspace); err == nil || !strings.Contains(err.Error(), "symlink component") {
+		t.Fatalf("LoadForPlanning() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestPlannerRejectsAbsoluteExplicitObjectPath(t *testing.T) {
+	workspace := t.TempDir()
+	object := writeCOFFObject(t, workspace, "objects/test.o", 0x8664)
+	manifestPath := writeManifest(t, workspace, fmt.Sprintf(`
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: absolute
+        object: %q
+        expect: {success_only: true}
+`, filepath.ToSlash(canonical(t, object))))
+	if _, err := Load(manifestPath, workspace); err != nil {
+		t.Fatalf("direct Load() no longer accepts a confined absolute object: %v", err)
+	}
+	if _, err := LoadForPlanning(manifestPath, workspace); err == nil || !strings.Contains(err.Error(), "must be relative to the object root") {
+		t.Fatalf("LoadForPlanning() absolute object error = %v", err)
+	}
+}
+
+func TestLoadWithObjectRootExcludesCheckoutObjects(t *testing.T) {
+	workspace := t.TempDir()
+	objectRoot := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/stale.o", 0x8664)
+	writeFile(t, workspace, "fixtures/input.bin", []byte("fixture"))
+	writeCOFFObject(t, objectRoot, "objects/planned.o", 0x8664)
+	manifestPath := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    collections:
+      - name: exact
+        glob: objects/*.o
+        args:
+          - {type: file, value: fixtures/input.bin}
+        expect: {success_only: true}
+`)
+	loaded, err := LoadWithObjectRoot(manifestPath, workspace, objectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Plans) != 1 || loaded.Plans[0].ObjectPath != "objects/planned.o" {
+		t.Fatalf("isolated plans = %#v", loaded.Plans)
+	}
+	if loaded.Plans[0].Settings.Args[0].File != canonical(t, filepath.Join(workspace, "fixtures/input.bin")) {
+		t.Fatalf("file argument escaped caller workspace: %#v", loaded.Plans[0].Settings.Args[0])
+	}
+	if _, err := LoadWithObjectRoot(manifestPath, workspace, workspace); err == nil || !strings.Contains(err.Error(), "must not overlap") {
+		t.Fatalf("overlapping object root error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(objectRoot, "unexpected.txt"), []byte("unexpected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadWithObjectRoot(manifestPath, workspace, objectRoot); err == nil || !strings.Contains(err.Error(), "non-object file") {
+		t.Fatalf("unexpected artifact file error = %v", err)
 	}
 }
 

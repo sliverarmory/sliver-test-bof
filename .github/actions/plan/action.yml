@@ -28,6 +28,8 @@ outputs:
     description: Immutable Sliver selector selected for every matrix job.
   matrix:
     description: GitHub Actions matrix JSON with target, runner, and key fields.
+  objects-dir:
+    description: Private directory containing only validated BOF objects at workspace-relative paths.
 
 runs:
   using: node24

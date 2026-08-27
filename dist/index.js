@@ -174,6 +174,8 @@ async function run() {
   const actionRoot = findActionRoot();
   const workspace = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
   const manifest = absoluteFromWorkspace(input('manifest', '.github/sliver-bof-e2e.yml'), workspace);
+  const objectRootInput = input('object-root');
+  const objectRoot = objectRootInput ? absoluteFromWorkspace(objectRootInput, workspace) : '';
   const resultsDir = absoluteFromWorkspace(input('results-dir', '.sliver-bof-e2e/results'), workspace);
   const target = input('target');
   const sliverVersion = input('sliver-version');
@@ -196,6 +198,7 @@ async function run() {
     resultsDir,
     '--action-version',
     actionVersion,
+    ...(objectRoot ? ['--object-root', objectRoot] : []),
   ];
   const goRunArgs = (command) => [
     'run',
@@ -211,6 +214,12 @@ async function run() {
 
   if (mode !== 'prepare') {
     const args = goRunArgs(mode);
+    let objectsDir = '';
+    if (mode === 'plan') {
+      objectsDir = fs.mkdtempSync(path.join(runnerTemp, 'sliver-bof-e2e-objects-'));
+      fs.chmodSync(objectsDir, 0o700);
+      args.push('--objects-dir', objectsDir);
+    }
     if (githubOutput) args.push('--github-output', githubOutput);
     if (mode === 'plan' && sliverVersion) args.push('--sliver-version', sliverVersion);
     // Both commands are compiled on fresh jobs. Allow dependency acquisition
@@ -218,12 +227,20 @@ async function run() {
     const env = childEnvironment(process.env, true);
     let token = mode === 'plan' ? input('github-token') : '';
     if (token) env.GITHUB_TOKEN = token;
-    const exitCode = await launchGo(actionRoot, args, env, () => {
-      clearCredentialInputs();
-      delete env.GITHUB_TOKEN;
-      token = '';
-    });
-    if (exitCode !== 0) process.exitCode = exitCode;
+    try {
+      const exitCode = await launchGo(actionRoot, args, env, () => {
+        clearCredentialInputs();
+        delete env.GITHUB_TOKEN;
+        token = '';
+      });
+      if (exitCode !== 0) {
+        process.exitCode = exitCode;
+        if (objectsDir) fs.rmSync(objectsDir, { recursive: true, force: true, maxRetries: 2 });
+      }
+    } catch (error) {
+      if (objectsDir) fs.rmSync(objectsDir, { recursive: true, force: true, maxRetries: 2 });
+      throw error;
+    }
     return;
   }
 

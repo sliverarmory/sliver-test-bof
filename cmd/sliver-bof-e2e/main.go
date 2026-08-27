@@ -36,6 +36,7 @@ const (
 type commonFlags struct {
 	manifestPath  string
 	workspace     string
+	objectRoot    string
 	resultsDir    string
 	githubOutput  string
 	sliverVersion string
@@ -46,7 +47,13 @@ type planDocument struct {
 	Schema     string             `json:"schema"`
 	Manifest   string             `json:"manifest"`
 	Matrix     manifest.Matrix    `json:"matrix"`
+	Objects    []plannedObject    `json:"objects"`
 	Resolution acquire.Resolution `json:"sliver"`
+}
+
+type plannedObject struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 type aggregateDocument struct {
@@ -118,6 +125,7 @@ func addCommonFlags(flags *flag.FlagSet, includeVersion bool) *commonFlags {
 	values := &commonFlags{}
 	flags.StringVar(&values.manifestPath, "manifest", defaultManifest, "path to the test manifest")
 	flags.StringVar(&values.workspace, "workspace", "", "caller workspace (defaults to current directory)")
+	flags.StringVar(&values.objectRoot, "object-root", "", "optional isolated root for planner-staged BOF objects")
 	flags.StringVar(&values.resultsDir, "results-dir", ".sliver-bof-e2e/results", "result directory")
 	flags.StringVar(&values.githubOutput, "github-output", "", "GitHub Actions output command file")
 	flags.StringVar(&values.actionVersion, "action-version", "", "immutable action/workflow identity recorded in reports")
@@ -147,6 +155,12 @@ func (values *commonFlags) normalize() error {
 	if !filepath.IsAbs(values.resultsDir) {
 		values.resultsDir = filepath.Join(values.workspace, values.resultsDir)
 	}
+	if strings.TrimSpace(values.objectRoot) != "" {
+		if !filepath.IsAbs(values.objectRoot) {
+			values.objectRoot = filepath.Join(values.workspace, values.objectRoot)
+		}
+		values.objectRoot = filepath.Clean(values.objectRoot)
+	}
 	values.manifestPath = filepath.Clean(values.manifestPath)
 	values.resultsDir = filepath.Clean(values.resultsDir)
 	values.actionVersion, err = resolveActionVersion(values.actionVersion)
@@ -160,6 +174,8 @@ func runPlan(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	common := addCommonFlags(flags, true)
+	var objectsDir string
+	flags.StringVar(&objectsDir, "objects-dir", "", "private directory in which to stage validated BOF objects")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -169,7 +185,7 @@ func runPlan(ctx context.Context, args []string) error {
 	if err := common.normalize(); err != nil {
 		return err
 	}
-	loaded, err := manifest.Load(common.manifestPath, common.workspace)
+	loaded, err := manifest.LoadForPlanning(common.manifestPath, common.workspace)
 	if err != nil {
 		return err
 	}
@@ -182,7 +198,11 @@ func runPlan(ctx context.Context, args []string) error {
 	if len(matrix.Include) == 0 {
 		return errors.New("manifest produced an empty target matrix")
 	}
-	document := planDocument{Schema: planSchema, Manifest: loaded.Path, Matrix: matrix, Resolution: resolution}
+	objects, err := stagePlanObjects(loaded.Workspace, objectsDir, loaded.Plans)
+	if err != nil {
+		return fmt.Errorf("stage planned BOF objects: %w", err)
+	}
+	document := planDocument{Schema: planSchema, Manifest: loaded.Path, Matrix: matrix, Objects: objects, Resolution: resolution}
 	if err := writeJSON(filepath.Join(common.resultsDir, "plan.json"), document); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
@@ -190,11 +210,19 @@ func runPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := appendOutputs(common.githubOutput, map[string]string{
+	outputs := map[string]string{
 		"matrix":          string(matrixJSON),
 		"resolved-sliver": resolution.Selector,
 		"results-dir":     common.resultsDir,
-	}); err != nil {
+	}
+	if strings.TrimSpace(objectsDir) != "" {
+		absoluteObjectsDir, absoluteErr := filepath.Abs(objectsDir)
+		if absoluteErr != nil {
+			return fmt.Errorf("resolve staged objects directory: %w", absoluteErr)
+		}
+		outputs["objects-dir"] = filepath.Clean(absoluteObjectsDir)
+	}
+	if err := appendOutputs(common.githubOutput, outputs); err != nil {
 		return err
 	}
 	fmt.Printf("Planned %d target(s) with Sliver %s\n", len(matrix.Include), resolution.Selector)
@@ -221,7 +249,7 @@ func runPrepare(ctx context.Context, args []string) error {
 	if err := common.normalize(); err != nil {
 		return err
 	}
-	loaded, err := manifest.Load(common.manifestPath, common.workspace)
+	loaded, err := loadManifest(common)
 	if err != nil {
 		return err
 	}
@@ -312,7 +340,7 @@ func runTarget(ctx context.Context, args []string) error {
 	// before parsing caller-controlled inputs or launching any Sliver process,
 	// even for direct CLI users outside the composite action.
 	_ = os.Unsetenv("GITHUB_TOKEN")
-	loaded, err := manifest.Load(common.manifestPath, common.workspace)
+	loaded, err := loadManifest(common)
 	if err != nil {
 		return err
 	}
@@ -329,7 +357,7 @@ func runTarget(ctx context.Context, args []string) error {
 		return err
 	}
 	selector := selectedSliverVersion(common.sliverVersion, loaded.Config.Sliver.Version)
-	cases, err := convertPlans(common.workspace, plans)
+	cases, err := convertPlans(plans)
 	if err != nil {
 		return writeInfrastructureFailure(common, targetKey, selector, acquire.Provenance{}, err)
 	}
@@ -356,6 +384,7 @@ func runTarget(ctx context.Context, args []string) error {
 	}
 	report, runErr := harness.Run(ctx, harness.Options{
 		Workspace: common.workspace, ServerPath: server, Target: target, Cases: cases,
+		Fixtures:   convertFixtures(loaded.Config.Fixtures),
 		ResultsDir: common.resultsDir, StateFile: stateFile, Loader: loader,
 		Sliver: toResultProvenance(provenance), ActionVersion: common.actionVersion,
 	})
@@ -406,7 +435,7 @@ func runAggregate(args []string) error {
 	if err := common.normalize(); err != nil {
 		return err
 	}
-	loaded, err := manifest.Load(common.manifestPath, common.workspace)
+	loaded, err := loadManifest(common)
 	if err != nil {
 		return err
 	}
@@ -436,6 +465,13 @@ func runAggregate(args []string) error {
 	stepSummaryErr := appendSummary(summary)
 	outputErr := appendOutputs(common.githubOutput, map[string]string{"results-dir": common.resultsDir})
 	return errors.Join(aggregateErr, coverageErr, caseCoverageErr, provenanceErr, writeJSONErr, writeSummaryErr, stepSummaryErr, outputErr)
+}
+
+func loadManifest(common *commonFlags) (*manifest.Manifest, error) {
+	if strings.TrimSpace(common.objectRoot) != "" {
+		return manifest.LoadWithObjectRoot(common.manifestPath, common.workspace, common.objectRoot)
+	}
+	return manifest.Load(common.manifestPath, common.workspace)
 }
 
 func selectedSliverVersion(override, configured string) string {
@@ -469,7 +505,7 @@ func parseTarget(value string) (harness.Target, error) {
 	return harness.Target{OS: osName, Arch: architecture}, nil
 }
 
-func convertPlans(workspace string, plans []manifest.Plan) ([]harness.Case, error) {
+func convertPlans(plans []manifest.Plan) ([]harness.Case, error) {
 	cases := make([]harness.Case, 0, len(plans))
 	for _, plan := range plans {
 		object, err := os.ReadFile(plan.Object)
@@ -495,10 +531,6 @@ func convertPlans(workspace string, plans []manifest.Plan) ([]harness.Case, erro
 			}
 			arguments = append(arguments, converted)
 		}
-		relativeObject, relErr := filepath.Rel(workspace, plan.Object)
-		if relErr != nil {
-			relativeObject = plan.Object
-		}
 		expected := harness.OutputExpectation{
 			Equals: plan.Settings.Expect.Output.Equals, Contains: append([]string(nil), plan.Settings.Expect.Output.Contains...),
 			NotContains: append([]string(nil), plan.Settings.Expect.Output.NotContains...),
@@ -510,16 +542,39 @@ func convertPlans(workspace string, plans []manifest.Plan) ([]harness.Case, erro
 		}
 		cases = append(cases, harness.Case{
 			ID: plan.ID, Suite: plan.Suite, Name: plan.Name, Collection: plan.Collection,
-			ObjectPath: plan.Object, ObjectReportPath: filepath.ToSlash(relativeObject),
+			ObjectPath: plan.Object, ObjectReportPath: plan.ObjectPath,
 			ObjectData: object, ObjectSHA256: hex.EncodeToString(digest[:]), Entrypoint: plan.Settings.Entrypoint,
 			Executor: plan.Settings.BOFExecutor, Modes: append([]string(nil), plan.Settings.Modes...),
 			Repeat: plan.Settings.Repeat, CommandTimeout: plan.Settings.CommandTimeout,
 			Arguments: arguments, RawArguments: cloneOptionalBytes(plan.Settings.RawArgs, plan.Settings.HasRawArgs),
 			HasRawArguments: plan.Settings.HasRawArgs,
+			TCPListener:     convertTCPListener(plan.Settings.TCPListener),
 			Expectation:     harness.Expectation{SuccessOnly: plan.Settings.Expect.SuccessOnly, Output: expected},
 		})
 	}
 	return cases, nil
+}
+
+func convertFixtures(input manifest.Fixtures) harness.Fixtures {
+	output := harness.Fixtures{}
+	if input.File != nil {
+		output.File = &harness.FileFixture{Variable: input.File.Variable, ContentsUTF8: input.File.ContentsUTF8}
+	}
+	if input.Directory != nil {
+		files := make(map[string]string, len(input.Directory.Files))
+		for name, contents := range input.Directory.Files {
+			files[name] = contents
+		}
+		output.Directory = &harness.DirectoryFixture{Variable: input.Directory.Variable, Files: files}
+	}
+	return output
+}
+
+func convertTCPListener(input *manifest.TCPListener) *harness.TCPListener {
+	if input == nil {
+		return nil
+	}
+	return &harness.TCPListener{PortArgument: input.PortArgument}
 }
 
 func cloneOptionalBytes(value []byte, present bool) []byte {
@@ -846,7 +901,7 @@ func verifyCaseCoverage(plans []manifest.Plan, reports []results.Report) error {
 	seen := make(map[executionKey]struct{})
 	for _, report := range reports {
 		for _, result := range report.Cases {
-			if result.Repeat == 0 && result.Stage == "cleanup-implant" && result.Status != "pass" {
+			if result.Repeat == 0 && strings.HasPrefix(result.Stage, "cleanup-") && result.Status != "pass" {
 				if _, ok := validModes[executionKey{target: report.Target, id: result.ID, mode: result.Mode}]; !ok {
 					problems = append(problems, fmt.Sprintf("unexpected cleanup result %s/%s", report.Target, result.ID))
 				}

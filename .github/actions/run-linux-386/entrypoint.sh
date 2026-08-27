@@ -38,6 +38,7 @@ env -i \
 	/usr/local/bin/sliver-bof-e2e prepare \
 	--manifest "${manifest}" \
 	--workspace "${GITHUB_WORKSPACE}" \
+	--object-root "${SLIVER_BOF_OBJECT_ROOT}" \
 	--results-dir "${results_dir}" \
 	--github-output "${GITHUB_OUTPUT:-}" \
 	--sliver-version "${SLIVER_BOF_SLIVER_VERSION}" \
@@ -58,6 +59,7 @@ exec env -i \
 	/usr/local/bin/sliver-bof-e2e run \
 	--manifest "${manifest}" \
 	--workspace "${GITHUB_WORKSPACE}" \
+	--object-root "${SLIVER_BOF_OBJECT_ROOT}" \
 	--results-dir "${results_dir}" \
 	--sliver-version "${SLIVER_BOF_SLIVER_VERSION}" \
 	--target "${SLIVER_BOF_TARGET}" \

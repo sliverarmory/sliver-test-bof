@@ -46,6 +46,7 @@ exec env -i \
 	"${SLIVER_BOF_CONTROLLER}" run \
 	--manifest "${SLIVER_BOF_MANIFEST:-.github/sliver-bof-e2e.yml}" \
 	--workspace "${GITHUB_WORKSPACE:-${PWD}}" \
+	--object-root "${SLIVER_BOF_OBJECT_ROOT:-}" \
 	--results-dir "${SLIVER_BOF_RESULTS_DIR}" \
 	--sliver-version "${SLIVER_BOF_SLIVER_VERSION:-}" \
 	--target "${SLIVER_BOF_TARGET}" \

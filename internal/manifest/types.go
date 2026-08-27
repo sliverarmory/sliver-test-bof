@@ -14,8 +14,11 @@ const (
 )
 
 // Manifest is a fully validated manifest and its expanded execution plans.
-// Paths in Config and Plans are absolute, symlink-resolved paths confined to
-// Workspace.
+// Manifest and typed file-argument paths in Config are absolute,
+// symlink-resolved paths confined to Workspace. Plan.Object is confined to
+// Workspace for direct loads or to the isolated artifact root for reusable
+// workflow loads. Plan.ObjectPath is its portable root-relative report and
+// artifact path.
 type Manifest struct {
 	Workspace string `json:"workspace"`
 	Path      string `json:"path"`
@@ -28,12 +31,28 @@ type Manifest struct {
 type Config struct {
 	Schema   string       `json:"schema"`
 	Sliver   SliverConfig `json:"sliver"`
+	Fixtures Fixtures     `json:"fixtures,omitempty"`
 	Defaults Settings     `json:"defaults"`
 	Suites   []Suite      `json:"suites"`
 }
 
 type SliverConfig struct {
 	Version string `json:"version"`
+}
+
+type Fixtures struct {
+	File      *FileFixture      `json:"file,omitempty"`
+	Directory *DirectoryFixture `json:"directory,omitempty"`
+}
+
+type FileFixture struct {
+	Variable     string `json:"variable"`
+	ContentsUTF8 string `json:"contents_utf8"`
+}
+
+type DirectoryFixture struct {
+	Variable string            `json:"variable"`
+	Files    map[string]string `json:"files,omitempty"`
 }
 
 type Target struct {
@@ -75,7 +94,12 @@ type Settings struct {
 	Args           []Argument    `json:"args,omitempty"`
 	RawArgs        []byte        `json:"args_raw,omitempty"`
 	HasRawArgs     bool          `json:"-"`
+	TCPListener    *TCPListener  `json:"tcp_listener,omitempty"`
 	Expect         Expectation   `json:"expect"`
+}
+
+type TCPListener struct {
+	PortArgument int `json:"port_argument"`
 }
 
 type Argument struct {
@@ -110,6 +134,7 @@ type Plan struct {
 	Name       string   `json:"name"`
 	Collection string   `json:"collection,omitempty"`
 	Object     string   `json:"object"`
+	ObjectPath string   `json:"object_path"`
 	Target     Target   `json:"target"`
 	Settings   Settings `json:"settings"`
 }

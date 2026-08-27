@@ -9,6 +9,9 @@ inputs:
   target:
     description: Manifest target. This action accepts only linux/386.
     required: true
+  object-root:
+    description: Private root containing only planner-staged BOF objects.
+    required: true
   sliver-version:
     description: Immutable Sliver selector emitted by the planner.
     required: true
@@ -39,6 +42,7 @@ runs:
       env:
         SLIVER_BOF_MANIFEST: ${{ inputs.manifest }}
         SLIVER_BOF_TARGET: ${{ inputs.target }}
+        SLIVER_BOF_OBJECT_ROOT: ${{ inputs.object-root }}
         SLIVER_BOF_SLIVER_VERSION: ${{ inputs.sliver-version }}
         SLIVER_BOF_RESULTS_DIR: ${{ inputs.results-dir }}
         SLIVER_BOF_GITHUB_TOKEN: ${{ inputs.github-token }}

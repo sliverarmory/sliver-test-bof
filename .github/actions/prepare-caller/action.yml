@@ -1,0 +1,21 @@
+name: Prepare caller BOF objects
+description: Run a trusted caller build command with plan metadata and no GitHub command-file or credential environment.
+
+inputs:
+  command:
+    description: Trusted Bash command that builds every manifest-referenced BOF object.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build caller BOF objects
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        SLIVER_BOF_E2E_PREPARE_COMMAND: ${{ inputs.command }}
+        SLIVER_BOF_E2E_PHASE: plan
+        SLIVER_BOF_E2E_TARGET: ''
+        SLIVER_BOF_E2E_OS: ''
+        SLIVER_BOF_E2E_ARCH: ''
+      run: bash "${GITHUB_ACTION_PATH}/../../../dist/prepare-caller.sh"

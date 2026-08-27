@@ -52,6 +52,72 @@ test('clearCredentialInputs overwrites and removes token inputs', () => {
   assert.deepEqual(environment, { PATH: '/tools' });
 });
 
+test('prepare-caller runs the caller command with plan metadata and no command-file credentials', {
+  skip: process.platform === 'win32' ? 'planner hook runs on Ubuntu' : false,
+}, () => {
+  const result = spawnSync('bash', [path.join(__dirname, 'prepare-caller.sh')], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ACTIONS_RUNTIME_TOKEN: 'service-secret',
+      GITHUB_ENV: '/tmp/github-env-command',
+      GITHUB_OUTPUT: '/tmp/github-output-command',
+      GITHUB_PATH: '/tmp/github-path-command',
+      GITHUB_STATE: '/tmp/github-state-command',
+      GITHUB_TOKEN: 'github-secret',
+      SLIVER_BOF_E2E_ARCH: '',
+      SLIVER_BOF_E2E_OS: '',
+      SLIVER_BOF_E2E_PHASE: 'plan',
+      SLIVER_BOF_E2E_PREPARE_COMMAND: 'env | sort',
+      SLIVER_BOF_E2E_TARGET: '',
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^SLIVER_BOF_E2E_PHASE=plan$/m);
+  for (const name of [
+    'ACTIONS_RUNTIME_TOKEN', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH',
+    'GITHUB_STATE', 'GITHUB_TOKEN', 'SLIVER_BOF_E2E_PREPARE_COMMAND',
+  ]) {
+    assert.doesNotMatch(result.stdout, new RegExp(`^${name}=`, 'm'));
+  }
+});
+
+test('manifest schema rejects non-portable fixture paths and constrains TCP listeners to typed args', () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'schema', 'sliver-bof-e2e-v1.schema.json'), 'utf8'));
+  const pattern = new RegExp(schema.$defs.fixtures.properties.directory.properties.files.propertyNames.pattern);
+  for (const value of ['marker.txt', '.hidden/child.txt', 'unicode/café.txt']) {
+    assert.equal(pattern.test(value), true, value);
+  }
+  for (const value of ['../escape', 'nested\\escape', 'bad?.txt', 'CON.txt', 'dir./child.txt']) {
+    assert.equal(pattern.test(value), false, value);
+  }
+  const objectPattern = new RegExp(schema.$defs.test.properties.object.pattern);
+  for (const value of ['build/windows/amd64/test.o', '.objects/test.o']) {
+    assert.equal(objectPattern.test(value), true, value);
+  }
+  for (const value of ['/tmp/test.o', 'C:/temp/test.o', '../test.o', 'build\\test.o']) {
+    assert.equal(objectPattern.test(value), false, value);
+  }
+  for (const name of ['test', 'collection']) {
+    const conditions = schema.$defs[name].allOf;
+    assert.ok(conditions.some((condition) => (
+      condition.if?.required?.includes('tcp_listener')
+      && condition.then?.required?.includes('args')
+      && condition.then?.not?.required?.includes('args_raw_base64')
+    )), `${name} does not constrain tcp_listener arguments`);
+  }
+  assert.ok(schema.$defs.override.allOf.some((condition) => (
+    condition.if?.required?.includes('tcp_listener')
+    && !condition.then?.required?.includes('args')
+    && condition.then?.not?.required?.includes('args_raw_base64')
+  )), 'override does not allow inherited typed args for tcp_listener');
+  assert.ok(schema.$defs.collection.allOf.some((condition) => (
+    condition.if?.required?.includes('tcp_listener')
+    && condition.then?.properties?.overrides?.additionalProperties
+  )), 'collection does not constrain raw-argument overrides of an inherited tcp_listener');
+});
+
 test('prepared runtime replaces its environment before executing BOFs', {
   skip: process.platform === 'win32' ? 'POSIX shell fixture' : false,
 }, () => {

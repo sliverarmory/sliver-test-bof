@@ -5,8 +5,24 @@ import "gopkg.in/yaml.v3"
 type rawConfig struct {
 	Schema   string          `yaml:"schema"`
 	Sliver   rawSliverConfig `yaml:"sliver"`
+	Fixtures *rawFixtures    `yaml:"fixtures"`
 	Defaults rawDefaults     `yaml:"defaults"`
 	Suites   []rawSuite      `yaml:"suites"`
+}
+
+type rawFixtures struct {
+	File      *rawFileFixture      `yaml:"file"`
+	Directory *rawDirectoryFixture `yaml:"directory"`
+}
+
+type rawFileFixture struct {
+	Variable     string  `yaml:"variable"`
+	ContentsUTF8 *string `yaml:"contents_utf8"`
+}
+
+type rawDirectoryFixture struct {
+	Variable string            `yaml:"variable"`
+	Files    map[string]string `yaml:"files"`
 }
 
 type rawSliverConfig struct {
@@ -54,7 +70,12 @@ type rawSettings struct {
 	CommandTimeout *string         `yaml:"command_timeout"`
 	Args           *[]rawArgument  `yaml:"args"`
 	ArgsRawBase64  *string         `yaml:"args_raw_base64"`
+	TCPListener    *rawTCPListener `yaml:"tcp_listener"`
 	Expect         *rawExpectation `yaml:"expect"`
+}
+
+type rawTCPListener struct {
+	PortArgument *int `yaml:"port_argument"`
 }
 
 type rawArgument struct {

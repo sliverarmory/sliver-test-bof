@@ -9,6 +9,9 @@ inputs:
   target:
     description: Manifest target to run, formatted as os/arch. Optional for a single-target manifest.
     required: false
+  object-root:
+    description: Optional private root containing only planner-staged BOF objects.
+    required: false
   sliver-version:
     description: Optional Sliver selector override. Defaults to manifest sliver.version; reusable workflows pass the immutable plan result.
     required: false
@@ -42,6 +45,7 @@ runs:
       with:
         manifest: ${{ inputs.manifest }}
         target: ${{ inputs.target }}
+        object-root: ${{ inputs.object-root }}
         sliver-version: ${{ inputs.sliver-version }}
         sliver-server-path: ${{ inputs.sliver-server-path }}
         results-dir: ${{ inputs.results-dir }}
@@ -59,6 +63,7 @@ runs:
         SLIVER_BOF_CONTROLLER: ${{ steps.prepare.outputs.controller }}
         SLIVER_BOF_MANIFEST: ${{ inputs.manifest }}
         SLIVER_BOF_TARGET: ${{ steps.prepare.outputs.target }}
+        SLIVER_BOF_OBJECT_ROOT: ${{ inputs.object-root }}
         SLIVER_BOF_SLIVER_VERSION: ${{ inputs.sliver-version }}
         SLIVER_BOF_RESULTS_DIR: ${{ steps.prepare.outputs.results-dir }}
         SLIVER_BOF_ACTION_VERSION: ${{ steps.prepare.outputs.action-version }}

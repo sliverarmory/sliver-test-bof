@@ -34,6 +34,25 @@ type Expectation struct {
 	Output      OutputExpectation
 }
 
+type Fixtures struct {
+	File      *FileFixture
+	Directory *DirectoryFixture
+}
+
+type FileFixture struct {
+	Variable     string
+	ContentsUTF8 string
+}
+
+type DirectoryFixture struct {
+	Variable string
+	Files    map[string]string
+}
+
+type TCPListener struct {
+	PortArgument int
+}
+
 type Case struct {
 	ID               string
 	Suite            string
@@ -51,6 +70,7 @@ type Case struct {
 	Arguments        []Argument
 	RawArguments     []byte
 	HasRawArguments  bool
+	TCPListener      *TCPListener
 	Expectation      Expectation
 }
 
@@ -73,6 +93,7 @@ type Options struct {
 	ServerPath     string
 	Target         Target
 	Cases          []Case
+	Fixtures       Fixtures
 	ResultsDir     string
 	StateFile      string
 	Sliver         results.Provenance

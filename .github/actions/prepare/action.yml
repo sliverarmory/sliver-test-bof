@@ -9,6 +9,9 @@ inputs:
   target:
     description: Manifest target to prepare, formatted as os/arch. Optional for a single-target manifest.
     required: false
+  object-root:
+    description: Optional private root containing only planner-staged BOF objects.
+    required: false
   sliver-version:
     description: Optional Sliver selector override.
     required: false

@@ -11,20 +11,26 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sliverarmory/sliver-test-bof/internal/safepath"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	maxRepeat      = 1000
-	maxTimeout     = 24 * time.Hour
-	maxArguments   = 1024
-	maxInlineBytes = 16 << 20
+	maxRepeat            = 1000
+	maxTimeout           = 24 * time.Hour
+	maxArguments         = 1024
+	maxInlineBytes       = 16 << 20
+	maxFixtureFiles      = 256
+	maxFixtureFileBytes  = 1 << 20
+	maxFixtureTotalBytes = 16 << 20
 )
 
 var versionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+var fixtureVariablePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+var fixturePlaceholderPattern = regexp.MustCompile(`^\$\{([A-Z][A-Z0-9_]{0,63})\}$`)
 
-func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
+func normalize(raw rawConfig, paths, objects pathResolver) (Config, []Plan, error) {
 	if raw.Schema != SchemaV1 {
 		return Config{}, nil, fmt.Errorf("schema must be %q", SchemaV1)
 	}
@@ -35,6 +41,10 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 		return Config{}, nil, fmt.Errorf("suites must contain at least one suite")
 	}
 
+	fixtures, fixtureVariables, err := normalizeFixtures(raw.Fixtures)
+	if err != nil {
+		return Config{}, nil, err
+	}
 	defaults, err := normalizeDefaults(raw.Defaults)
 	if err != nil {
 		return Config{}, nil, err
@@ -46,6 +56,7 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 	config := Config{
 		Schema:   raw.Schema,
 		Sliver:   SliverConfig{Version: version},
+		Fixtures: fixtures,
 		Defaults: defaults,
 		Suites:   make([]Suite, 0, len(raw.Suites)),
 	}
@@ -91,26 +102,27 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 			if filepath.Ext(inputTest.Object) != ".o" {
 				return Config{}, nil, fmt.Errorf("%s.object %q must have a .o extension", testWhere, inputTest.Object)
 			}
-			object, err := paths.file(inputTest.Object, testWhere+".object")
+			object, objectPath, err := objects.declaredObject(inputTest.Object, testWhere+".object")
 			if err != nil {
 				return Config{}, nil, err
 			}
 			if err := validateObject(object, target); err != nil {
 				return Config{}, nil, fmt.Errorf("%s.object: %w", testWhere, err)
 			}
-			settings, err := normalizeSettings(defaults, inputTest.rawSettings, paths, testWhere)
+			settings, err := normalizeSettings(defaults, inputTest.rawSettings, paths, fixtureVariables, testWhere)
 			if err != nil {
 				return Config{}, nil, err
 			}
 			test := Test{Name: inputTest.Name, Object: object, Settings: settings}
 			suite.Tests = append(suite.Tests, test)
 			plan := Plan{
-				ID:       input.Name + "/" + inputTest.Name,
-				Suite:    input.Name,
-				Name:     inputTest.Name,
-				Object:   object,
-				Target:   target,
-				Settings: cloneSettings(settings),
+				ID:         input.Name + "/" + inputTest.Name,
+				Suite:      input.Name,
+				Name:       inputTest.Name,
+				Object:     object,
+				ObjectPath: objectPath,
+				Target:     target,
+				Settings:   cloneSettings(settings),
 			}
 			if err := appendUniquePlan(&plans, planIDs, plan); err != nil {
 				return Config{}, nil, err
@@ -126,11 +138,11 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 				return Config{}, nil, fmt.Errorf("%s.name %q is duplicated in suite %q", collectionWhere, inputCollection.Name, input.Name)
 			}
 			itemNames[inputCollection.Name] = struct{}{}
-			collectionSettings, err := normalizeSettings(defaults, inputCollection.rawSettings, paths, collectionWhere)
+			collectionSettings, err := normalizeSettings(defaults, inputCollection.rawSettings, paths, fixtureVariables, collectionWhere)
 			if err != nil {
 				return Config{}, nil, err
 			}
-			matches, err := paths.glob(inputCollection.Glob, collectionWhere+".glob")
+			matches, err := objects.glob(inputCollection.Glob, collectionWhere+".glob")
 			if err != nil {
 				return Config{}, nil, err
 			}
@@ -152,7 +164,7 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 
 				settings := cloneSettings(collectionSettings)
 				if override, ok := inputCollection.Overrides[match.basename]; ok {
-					settings, err = normalizeSettings(settings, override, paths, collectionWhere+".overrides["+match.basename+"]")
+					settings, err = normalizeSettings(settings, override, paths, fixtureVariables, collectionWhere+".overrides["+match.basename+"]")
 					if err != nil {
 						return Config{}, nil, err
 					}
@@ -163,6 +175,7 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 					Name:       match.basename,
 					Collection: inputCollection.Name,
 					Object:     match.path,
+					ObjectPath: match.workspacePath,
 					Target:     target,
 					Settings:   settings,
 				}
@@ -188,6 +201,95 @@ func normalize(raw rawConfig, paths pathResolver) (Config, []Plan, error) {
 		config.Suites = append(config.Suites, suite)
 	}
 	return config, plans, nil
+}
+
+func normalizeFixtures(raw *rawFixtures) (Fixtures, map[string]struct{}, error) {
+	variables := make(map[string]struct{}, 2)
+	if raw == nil {
+		return Fixtures{}, variables, nil
+	}
+	if raw.File == nil && raw.Directory == nil {
+		return Fixtures{}, nil, fmt.Errorf("fixtures must define file or directory")
+	}
+	fixtures := Fixtures{}
+	totalBytes := 0
+	addVariable := func(value, where string) error {
+		if !fixtureVariablePattern.MatchString(value) {
+			return fmt.Errorf("%s.variable %q must match %s", where, value, fixtureVariablePattern)
+		}
+		folded := strings.ToUpper(value)
+		if _, exists := variables[folded]; exists {
+			return fmt.Errorf("%s.variable %q is duplicated", where, value)
+		}
+		variables[folded] = struct{}{}
+		return nil
+	}
+	if raw.File != nil {
+		if err := addVariable(raw.File.Variable, "fixtures.file"); err != nil {
+			return Fixtures{}, nil, err
+		}
+		if raw.File.ContentsUTF8 == nil {
+			return Fixtures{}, nil, fmt.Errorf("fixtures.file.contents_utf8 is required")
+		}
+		contents := *raw.File.ContentsUTF8
+		if !utf8.ValidString(contents) {
+			return Fixtures{}, nil, fmt.Errorf("fixtures.file.contents_utf8 must contain valid UTF-8")
+		}
+		if len(contents) > maxFixtureFileBytes {
+			return Fixtures{}, nil, fmt.Errorf("fixtures.file.contents_utf8 exceeds %d bytes", maxFixtureFileBytes)
+		}
+		totalBytes += len(contents)
+		fixtures.File = &FileFixture{Variable: raw.File.Variable, ContentsUTF8: contents}
+	}
+	if raw.Directory != nil {
+		if err := addVariable(raw.Directory.Variable, "fixtures.directory"); err != nil {
+			return Fixtures{}, nil, err
+		}
+		if len(raw.Directory.Files) > maxFixtureFiles {
+			return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files contains %d entries; maximum is %d", len(raw.Directory.Files), maxFixtureFiles)
+		}
+		files := make(map[string]string, len(raw.Directory.Files))
+		seen := make(map[string]string, len(raw.Directory.Files))
+		for relative, contents := range raw.Directory.Files {
+			if err := validateFixtureRelativePath(relative); err != nil {
+				return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files[%q]: %w", relative, err)
+			}
+			folded := strings.ToUpper(relative)
+			if previous, duplicate := seen[folded]; duplicate {
+				return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files paths %q and %q collide on case-insensitive filesystems", previous, relative)
+			}
+			seen[folded] = relative
+			if !utf8.ValidString(contents) {
+				return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files[%q] must contain valid UTF-8", relative)
+			}
+			if len(contents) > maxFixtureFileBytes {
+				return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files[%q] exceeds %d bytes", relative, maxFixtureFileBytes)
+			}
+			totalBytes += len(contents)
+			if totalBytes > maxFixtureTotalBytes {
+				return Fixtures{}, nil, fmt.Errorf("fixture contents exceed %d bytes", maxFixtureTotalBytes)
+			}
+			files[relative] = contents
+		}
+		for folded, original := range seen {
+			components := strings.Split(folded, "/")
+			for index := 1; index < len(components); index++ {
+				ancestor := strings.Join(components[:index], "/")
+				if conflicting, exists := seen[ancestor]; exists {
+					return Fixtures{}, nil, fmt.Errorf("fixtures.directory.files paths %q and %q have a file/directory prefix collision", conflicting, original)
+				}
+			}
+		}
+		fixtures.Directory = &DirectoryFixture{Variable: raw.Directory.Variable, Files: files}
+	}
+	if totalBytes > maxFixtureTotalBytes {
+		return Fixtures{}, nil, fmt.Errorf("fixture contents exceed %d bytes", maxFixtureTotalBytes)
+	}
+	return fixtures, variables, nil
+}
+
+func validateFixtureRelativePath(value string) error {
+	return safepath.ValidatePortableRelative(value)
 }
 
 func normalizeDefaults(raw rawDefaults) (Settings, error) {
@@ -223,7 +325,7 @@ func normalizeDefaults(raw rawDefaults) (Settings, error) {
 	return settings, nil
 }
 
-func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, where string) (Settings, error) {
+func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, fixtureVariables map[string]struct{}, where string) (Settings, error) {
 	settings := cloneSettings(base)
 	if raw.BOFExecutor != nil {
 		settings.BOFExecutor = *raw.BOFExecutor
@@ -248,7 +350,7 @@ func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, where
 		return Settings{}, fmt.Errorf("%s cannot set both args and args_raw_base64", where)
 	}
 	if raw.Args != nil {
-		args, err := normalizeArguments(*raw.Args, paths, where+".args")
+		args, err := normalizeArguments(*raw.Args, paths, fixtureVariables, where+".args")
 		if err != nil {
 			return Settings{}, err
 		}
@@ -265,6 +367,13 @@ func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, where
 		settings.HasRawArgs = true
 		settings.Args = nil
 	}
+	if raw.TCPListener != nil {
+		if raw.TCPListener.PortArgument == nil {
+			return Settings{}, fmt.Errorf("%s.tcp_listener.port_argument is required", where)
+		}
+		listener := &TCPListener{PortArgument: *raw.TCPListener.PortArgument}
+		settings.TCPListener = listener
+	}
 	if raw.Expect != nil {
 		expect, err := normalizeExpectation(*raw.Expect, where+".expect")
 		if err != nil {
@@ -277,6 +386,9 @@ func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, where
 	}
 	if !validExpectation(settings.Expect) {
 		return Settings{}, fmt.Errorf("%s.expect must explicitly set success_only: true or at least one output assertion", where)
+	}
+	if err := validateTCPListener(settings, where); err != nil {
+		return Settings{}, err
 	}
 	return settings, nil
 }
@@ -312,7 +424,7 @@ func validateCoreSettings(settings Settings, where string) error {
 	return nil
 }
 
-func normalizeArguments(raw []rawArgument, paths pathResolver, where string) ([]Argument, error) {
+func normalizeArguments(raw []rawArgument, paths pathResolver, fixtureVariables map[string]struct{}, where string) ([]Argument, error) {
 	if len(raw) > maxArguments {
 		return nil, fmt.Errorf("%s contains %d arguments; maximum is %d", where, len(raw), maxArguments)
 	}
@@ -349,6 +461,9 @@ func normalizeArguments(raw []rawArgument, paths pathResolver, where string) ([]
 			if strings.ContainsRune(value, '\x00') {
 				return nil, fmt.Errorf("%s.value cannot contain a NUL byte", argWhere)
 			}
+			if err := validateFixturePlaceholder(value, fixtureVariables); err != nil {
+				return nil, fmt.Errorf("%s.value: %w", argWhere, err)
+			}
 			arg.String = value
 		case "file":
 			value, err := scalarString(input.Value)
@@ -380,6 +495,37 @@ func normalizeArguments(raw []rawArgument, paths pathResolver, where string) ([]
 		args = append(args, arg)
 	}
 	return args, nil
+}
+
+func validateFixturePlaceholder(value string, fixtureVariables map[string]struct{}) error {
+	if !strings.Contains(value, "${") {
+		return nil
+	}
+	match := fixturePlaceholderPattern.FindStringSubmatch(value)
+	if match == nil {
+		return fmt.Errorf("fixture substitution must be the entire value in the form ${NAME}")
+	}
+	if _, ok := fixtureVariables[strings.ToUpper(match[1])]; !ok {
+		return fmt.Errorf("unknown fixture variable %q", match[1])
+	}
+	return nil
+}
+
+func validateTCPListener(settings Settings, where string) error {
+	if settings.TCPListener == nil {
+		return nil
+	}
+	if settings.HasRawArgs {
+		return fmt.Errorf("%s.tcp_listener cannot be used with args_raw_base64", where)
+	}
+	index := settings.TCPListener.PortArgument
+	if index < 0 || index >= len(settings.Args) {
+		return fmt.Errorf("%s.tcp_listener.port_argument %d must index args", where, index)
+	}
+	if settings.Args[index].Type != "int" {
+		return fmt.Errorf("%s.args[%d].type must be int for tcp_listener.port_argument", where, index)
+	}
+	return nil
 }
 
 func scalarString(node yaml.Node) (string, error) {
@@ -476,6 +622,10 @@ func hasOutputExpectation(output OutputExpectation) bool {
 
 func cloneSettings(input Settings) Settings {
 	output := input
+	if input.TCPListener != nil {
+		listener := *input.TCPListener
+		output.TCPListener = &listener
+	}
 	if input.Expect.Output.Equals != nil {
 		equals := *input.Expect.Output.Equals
 		output.Expect.Output.Equals = &equals

@@ -31,8 +31,6 @@ jobs:
     uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@main
     with:
       manifest: .github/sliver-bof-e2e.yml
-    secrets:
-      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 Use `@main` only while evaluating the initial version. Replace it with a full action commit SHA for stable or required checks.
@@ -52,7 +50,37 @@ The planner validates the manifest, resolves the mutable Sliver selector once, a
 
 The manifest cannot supply arbitrary runner labels. That keeps pull-request-controlled configuration away from persistent self-hosted runners.
 
-The reusable workflow plans immediately after checkout, so every referenced `.o` file must already exist in the checked-out revision. If BOFs are produced by an earlier build step, use the direct action in a caller-owned matrix (or commit/download the objects before invoking it).
+The reusable workflow accepts an optional `prepare-command` for source-only BOF repositories. It builds once in the Ubuntu planner, validates and stages only the manifest-expanded `.o` files, then downloads those exact bytes into a private object root in every target and aggregate job. Manifests and byte-packed `file` arguments still resolve from the checkout, but object paths and collection globs resolve only from that isolated tree. Committed objects follow the same staging path even when the command is empty.
+
+### Source-only repositories
+
+Pass a trusted Bash command that produces every object referenced by a test or collection across the complete manifest:
+
+```yaml
+jobs:
+  bof-e2e:
+    uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@main
+    with:
+      manifest: .github/sliver-bof-e2e.yml
+      prepare-command: ./scripts/build-all-bofs.sh
+```
+
+The command runs once from the caller checkout on `ubuntu-24.04`, after Go setup and before manifest planning, under Bash's error and pipeline-failure handling. It receives an allowlisted build environment containing the installed tool `PATH`, standard home/temp/cache/compiler/proxy values, and:
+
+| Variable | Value |
+|---|---|
+| `SLIVER_BOF_E2E_PHASE` | `plan` |
+| `SLIVER_BOF_E2E_TARGET` | empty |
+| `SLIVER_BOF_E2E_OS` | empty |
+| `SLIVER_BOF_E2E_ARCH` | empty |
+
+Because the planner must expand collections for the whole matrix, the command must deterministically build all targets, not just the planner host. A nonzero exit fails planning. Use a checked-in script rather than embedding a large command in workflow YAML.
+
+After planning, the controller rejects BOF object symlinks, non-portable paths, path escapes, architecture mismatches, and case-insensitive destination collisions. It copies only validated `.o` files into a private `runner.temp` tree with workspace-relative layout. SHA-pinned artifact actions distribute that tree to every native runner, the Linux/386 container route, and aggregation. Each consumer validates the isolated tree and never extracts it over the caller checkout, so stale tracked objects and checkout symlinks cannot alter the planned collection. Sources, arbitrary build output, file arguments, and credentials are not included. A manifest `file` argument must therefore be committed or represented by the runtime fixture facility below.
+
+`prepare-command` is trusted caller code, not a sandbox. It runs as the planner's runner user with the workspace and network access. A fresh `env -i` subprocess explicitly withholds GitHub, Actions-runtime, OIDC, cloud, and GitHub command-file variables, so the hook cannot accidentally persist environment or `PATH` changes into the later token-bearing acquisition step. Callers must still avoid secrets, unreviewed pull-request code, `pull_request_target`, and persistent processes; same-user code can deliberately escape an environment-only boundary. The hook must clean up any processes or external state it creates. Sliver and BOF execution retains its separate credential-free environment boundary.
+
+If a build genuinely requires a target's native host rather than a cross-toolchain on Ubuntu, use the root action in a caller-owned matrix and build immediately before invoking it.
 
 ## Manifest
 
@@ -63,6 +91,15 @@ schema: sliver-bof-e2e/v1
 
 sliver:
   version: master
+
+fixtures:
+  file:
+    variable: FIXTURE_FILE
+    contents_utf8: "sliver-bof-e2e fixture\n"
+  directory:
+    variable: FIXTURE_DIR
+    files:
+      marker.txt: "marker\n"
 
 defaults:
   bof_executor: reflektor
@@ -87,6 +124,25 @@ suites:
           output:
             contains: [UserName, SID]
             matches: ['(?m)^Privilege Name']
+
+      - name: loopback-probe
+        object: build/windows/amd64/probe.o
+        args:
+          - {type: string, value: '127.0.0.1'}
+          - {type: int, value: 1}
+        tcp_listener:
+          port_argument: 1
+        expect:
+          output:
+            contains: [OPEN]
+
+      - name: fixture-path
+        object: build/windows/amd64/file-reader.o
+        args:
+          - {type: wstring, value: '${FIXTURE_FILE}'}
+        expect:
+          output:
+            contains: [sliver-bof-e2e fixture]
 
       - name: legacy-process-query
         object: build/windows/amd64/process.o
@@ -116,7 +172,7 @@ suites:
                 contains: ['PATH=']
 ```
 
-All object and `file` argument paths are relative to the caller workspace. Symlinks that resolve outside it are rejected. A collection expands its glob into one test per object; overrides are keyed by object basename.
+Manifest object and `file` argument paths are relative. In the reusable workflow, objects resolve from the planner-created private object root and object symlinks are rejected; `file` arguments resolve from the caller workspace. Direct root-action use resolves both from the caller workspace and preserves confined in-workspace object symlinks. Any symlink that resolves outside its permitted root is rejected. A collection expands its glob into one test per object; overrides are keyed by object basename.
 
 Settings may be placed on an individual test or collection. Collection overrides replace only the fields they name; an overridden `expect` replaces the whole inherited expectation, and `args` and `args_raw_base64` clear one another. The top-level `defaults` supports `bof_executor`, `entrypoint`, `modes`, `repeat`, and `command_timeout`.
 
@@ -134,6 +190,20 @@ Arguments are packed in the declared order using Beacon's little-endian argument
 | `bytes_base64` | base64-encoded bytes |
 
 Use `args_raw_base64` instead of `args` when the caller already has a complete argument buffer. Typed and raw arguments are mutually exclusive.
+
+### Runtime fixtures
+
+Top-level `fixtures.file` and `fixtures.directory` create deterministic resources beneath the action-owned, per-test temporary tree. Variables must match `[A-Z][A-Z0-9_]{0,63}` and be unique. Use an exact `${NAME}` value in a `string` or `wstring` argument; partial interpolation, malformed placeholders, and unknown variables are rejected. The harness substitutes the generated absolute host path immediately before packing arguments.
+
+Directory fixture file names use portable forward-slash relative paths. Absolute paths, `.` or `..` traversal, Windows-invalid/control characters, drive/UNC forms, case-insensitive collisions, Windows-reserved components, and trailing dots or spaces are rejected. Directories use mode `0700` and files `0600` where POSIX permissions apply. Each session/beacon case receives fresh fixtures; repeats within that case reuse them. All resources remain inside the tracked temporary root and are removed by normal or fallback cleanup.
+
+Fixture contents are UTF-8 and limited to 1 MiB per file, 16 MiB total, and 256 files in the directory fixture. These limits are enforced by byte length in the controller; schema `maxLength` remains an editor-side character-count hint.
+
+### Loopback TCP fixture
+
+Set `tcp_listener.port_argument` to the zero-based index of an `int` argument. For each test and mode, the harness binds an ephemeral `tcp4` listener to `127.0.0.1:0`, replaces that argument with the selected port, accepts and closes loopback probe connections, and keeps the socket open through all repeats. The bind address and port cannot be supplied by the manifest. Linux/386 creates the listener inside the container, so its implant shares the same loopback namespace.
+
+This fixture makes deterministic local `OPEN` assertions possible; it does not prevent a native BOF from making other outbound network connections.
 
 ### Output assertions
 
@@ -207,7 +277,6 @@ jobs:
           manifest: .github/sliver-bof-e2e.yml
           target: ${{ matrix.target }}
           sliver-version: master
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 The root action's outputs are `results-dir` and `resolved-sliver`. Planning and aggregation are implementation details of the reusable workflow rather than public root-action modes.
@@ -240,7 +309,7 @@ Every target writes:
 - server and per-implant logs, with bounded tails embedded in failure diagnostics
 - raw BOF output for every invocation
 
-Reports identify the action version, resolved Sliver selector/revision and server digest, stable expanded case ID, collection (when applicable), object digest, requested executor, mode, repeat number, timing, status, and failing lifecycle stage. Reusable-workflow reports use the exact repository and `job.workflow_sha`; direct-action reports are exact when the action is pinned to a full SHA and otherwise identify the requested mutable ref. The reusable workflow uploads each target separately and downloads all target reports into a clean `runner.temp` tree in an `always()` aggregate job. Aggregation requires the exact manifest-expanded inventory for every target, case ID, mode, and repeat; rejects missing, duplicate, unexpected, metadata-mismatched, or failed cases; and requires every report to agree on the action version and resolved Sliver provenance before uploading the combined tree for seven days.
+Reports identify the action version, resolved Sliver selector/revision and server digest, stable expanded case ID, collection (when applicable), object digest, requested executor, mode, repeat number, timing, status, and failing lifecycle stage. Reusable-workflow reports use the exact repository and `job.workflow_sha`; direct-action reports are exact when the action is pinned to a full SHA and otherwise identify the requested mutable ref. The reusable workflow uploads each target separately and downloads all target reports into a clean `runner.temp` tree in an `always()` aggregate job. Aggregation restores the same planner-validated object artifact and requires the exact manifest-expanded inventory for every target, case ID, mode, and repeat; rejects missing, duplicate, unexpected, metadata-mismatched, or failed cases; and requires every report to agree on the action version and resolved Sliver provenance before uploading the combined tree for seven days.
 
 ## Security boundary
 

@@ -5,15 +5,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sliverarmory/sliver-test-bof/internal/safepath"
 )
 
 type pathResolver struct {
-	root string
+	root                 string
+	rejectObjectSymlinks bool
 }
 
 type globMatch struct {
-	path     string
-	basename string
+	path          string
+	workspacePath string
+	basename      string
 }
 
 func newPathResolver(workspace string) (pathResolver, error) {
@@ -36,6 +40,15 @@ func newPathResolver(workspace string) (pathResolver, error) {
 		return pathResolver{}, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
 	return pathResolver{root: filepath.Clean(real)}, nil
+}
+
+func newObjectPathResolver(root string, rejectSymlinks bool) (pathResolver, error) {
+	resolver, err := newPathResolver(root)
+	if err != nil {
+		return pathResolver{}, err
+	}
+	resolver.rejectObjectSymlinks = rejectSymlinks
+	return resolver, nil
 }
 
 func (r pathResolver) file(value, field string) (string, error) {
@@ -76,6 +89,50 @@ func (r pathResolver) file(value, field string) (string, error) {
 	return filepath.Clean(real), nil
 }
 
+// object resolves a BOF object and also returns its stable, slash-separated
+// path relative to the selected object root. Planner and artifact roots reject
+// symlinks; direct action loads preserve confined in-workspace symlink support.
+func (r pathResolver) object(value, field string) (string, string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", "", fmt.Errorf("%s path is required", field)
+	}
+	candidate := filepath.FromSlash(value)
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(r.root, candidate)
+	}
+	candidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve %s path: %w", field, err)
+	}
+	candidate = filepath.Clean(candidate)
+	if !pathWithin(r.root, candidate) {
+		return "", "", fmt.Errorf("%s path %q escapes workspace", field, value)
+	}
+	if r.rejectObjectSymlinks {
+		if err := rejectSymlinkPath(r.root, candidate); err != nil {
+			return "", "", fmt.Errorf("%s path %q: %w", field, value, err)
+		}
+	}
+	real, err := r.file(candidate, field)
+	if err != nil {
+		return "", "", err
+	}
+	relative, err := filepath.Rel(r.root, candidate)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("resolve workspace-relative %s path %q", field, value)
+	}
+	return real, filepath.ToSlash(relative), nil
+}
+
+func (r pathResolver) declaredObject(value, field string) (string, string, error) {
+	if r.rejectObjectSymlinks {
+		if err := safepath.ValidatePortableRelative(value); err != nil {
+			return "", "", fmt.Errorf("%s path %q must be relative to the object root: %w", field, value, err)
+		}
+	}
+	return r.object(value, field)
+}
+
 func (r pathResolver) glob(pattern, field string) ([]globMatch, error) {
 	if strings.TrimSpace(pattern) == "" {
 		return nil, fmt.Errorf("%s glob is required", field)
@@ -104,7 +161,7 @@ func (r pathResolver) glob(pattern, field string) ([]globMatch, error) {
 	resolved := make([]globMatch, 0, len(matches))
 	seen := make(map[string]struct{}, len(matches))
 	for _, match := range matches {
-		real, err := r.file(match, field+" match")
+		real, workspacePath, err := r.object(match, field+" match")
 		if err != nil {
 			return nil, err
 		}
@@ -112,9 +169,28 @@ func (r pathResolver) glob(pattern, field string) ([]globMatch, error) {
 			continue
 		}
 		seen[real] = struct{}{}
-		resolved = append(resolved, globMatch{path: real, basename: filepath.Base(match)})
+		resolved = append(resolved, globMatch{path: real, workspacePath: workspacePath, basename: filepath.Base(match)})
 	}
 	return resolved, nil
+}
+
+func rejectSymlinkPath(root, candidate string) error {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("cannot derive a confined workspace path")
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect path component %q: %w", component, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink component %q is not allowed for BOF objects", component)
+		}
+	}
+	return nil
 }
 
 func pathWithin(root, candidate string) bool {
