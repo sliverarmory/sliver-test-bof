@@ -471,7 +471,11 @@ func acquireSourceServer(ctx context.Context, options Options, client *http.Clie
 		return "", Provenance{}, errors.New("Sliver source go.mod differs from the resolved commit metadata")
 	}
 	logf(options.Logger, "preparing Sliver embedded build assets with %s", toolchain)
-	if err := runLogged(ctx, options.Logger, source, commandEnv(false, "", "", requiredToolchain), goPath, "run", "-mod=vendor", "./util/cmd/assets", "--quiet", "--no-colors"); err != nil {
+	assetEnvironment, err := commandEnv(false, "", "", requiredToolchain)
+	if err != nil {
+		return "", Provenance{}, fmt.Errorf("prepare Sliver asset build environment: %w", err)
+	}
+	if err := runLogged(ctx, options.Logger, source, assetEnvironment, goPath, "run", "-mod=vendor", "./util/cmd/assets", "--quiet", "--no-colors"); err != nil {
 		return "", Provenance{}, fmt.Errorf("prepare Sliver build assets: %w", err)
 	}
 	binaryName := "sliver-server"
@@ -480,7 +484,11 @@ func acquireSourceServer(ctx context.Context, options Options, client *http.Clie
 	}
 	output := filepath.Join(work, binaryName)
 	logf(options.Logger, "building Sliver server for %s/%s", hostOS, hostArch)
-	if err := runLogged(ctx, options.Logger, source, commandEnv(true, hostOS, hostArch, requiredToolchain), goPath,
+	buildEnvironment, err := commandEnv(true, hostOS, hostArch, requiredToolchain)
+	if err != nil {
+		return "", Provenance{}, fmt.Errorf("prepare Sliver server build environment: %w", err)
+	}
+	if err := runLogged(ctx, options.Logger, source, buildEnvironment, goPath,
 		"build", "-buildvcs=false", "-mod=vendor", "-trimpath", "-tags", "go_sqlite,server", "-o", output, "./server"); err != nil {
 		return "", Provenance{}, fmt.Errorf("build Sliver server: %w", err)
 	}
@@ -700,7 +708,10 @@ func discoverToolchain(ctx context.Context, goPath string, goMod []byte, require
 	}
 	command := exec.CommandContext(ctx, goPath, "env", "GOVERSION")
 	command.Dir = directory
-	command.Env = commandEnv(false, "", "", requiredToolchain)
+	command.Env, err = commandEnv(false, "", "", requiredToolchain)
+	if err != nil {
+		return "", fmt.Errorf("prepare Go toolchain environment: %w", err)
+	}
 	output, err := command.Output()
 	if err != nil {
 		return "", err
@@ -715,23 +726,21 @@ func discoverToolchain(ctx context.Context, goPath string, goMod []byte, require
 	return version, nil
 }
 
-func commandEnv(build bool, goos, goarch, requiredToolchain string) []string {
+func commandEnv(build bool, goos, goarch, requiredToolchain string) ([]string, error) {
 	return commandEnvFrom(os.Environ(), build, goos, goarch, requiredToolchain)
 }
 
-func commandEnvFrom(hostEnvironment []string, build bool, goos, goarch, requiredToolchain string) []string {
+func commandEnvFrom(hostEnvironment []string, build bool, goos, goarch, requiredToolchain string) ([]string, error) {
 	allowed := []string{
 		"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
 		"TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "TZ",
 		"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
 		"GOPROXY", "GONOPROXY", "GONOSUMDB", "GOSUMDB",
 	}
-	host := make(map[string]string, len(allowed))
-	for _, item := range hostEnvironment {
-		name, value, found := strings.Cut(item, "=")
-		if found {
-			host[strings.ToUpper(name)] = value
-		}
+	recognized := append(append([]string(nil), allowed...), "RUNNER_TEMP")
+	host, err := canonicalHostEnvironment(hostEnvironment, recognized)
+	if err != nil {
+		return nil, err
 	}
 	environment := make([]string, 0, len(allowed)+16)
 	for _, name := range allowed {
@@ -789,7 +798,71 @@ func commandEnvFrom(hostEnvironment []string, build bool, goos, goarch, required
 			environment = append(environment, "GOARM64=v8.0")
 		}
 	}
-	return environment
+	return environment, nil
+}
+
+type hostEnvironmentCandidate struct {
+	exactValue      string
+	exactSet        bool
+	exactConflict   bool
+	variantValue    string
+	variantSet      bool
+	variantConflict bool
+}
+
+func canonicalHostEnvironment(environment, recognized []string) (map[string]string, error) {
+	allowed := make(map[string]struct{}, len(recognized))
+	for _, name := range recognized {
+		allowed[name] = struct{}{}
+	}
+	candidates := make(map[string]*hostEnvironmentCandidate, len(recognized))
+	for _, item := range environment {
+		name, value, found := strings.Cut(item, "=")
+		canonical := strings.ToUpper(name)
+		if !found || name == "" {
+			continue
+		}
+		if _, ok := allowed[canonical]; !ok {
+			continue
+		}
+		candidate := candidates[canonical]
+		if candidate == nil {
+			candidate = &hostEnvironmentCandidate{}
+			candidates[canonical] = candidate
+		}
+		if name == canonical {
+			if candidate.exactSet && candidate.exactValue != value {
+				candidate.exactConflict = true
+			} else if !candidate.exactSet {
+				candidate.exactValue = value
+				candidate.exactSet = true
+			}
+			continue
+		}
+		if candidate.variantSet && candidate.variantValue != value {
+			candidate.variantConflict = true
+		} else if !candidate.variantSet {
+			candidate.variantValue = value
+			candidate.variantSet = true
+		}
+	}
+
+	selected := make(map[string]string, len(recognized))
+	for _, name := range recognized {
+		candidate := candidates[name]
+		if candidate == nil {
+			continue
+		}
+		if candidate.exactConflict || !candidate.exactSet && candidate.variantConflict {
+			return nil, fmt.Errorf("conflicting case variants for environment variable %s", name)
+		}
+		if candidate.exactSet {
+			selected[name] = candidate.exactValue
+		} else if candidate.variantSet {
+			selected[name] = candidate.variantValue
+		}
+	}
+	return selected, nil
 }
 
 func runLogged(ctx context.Context, logger Logger, directory string, environment []string, executable string, arguments ...string) error {

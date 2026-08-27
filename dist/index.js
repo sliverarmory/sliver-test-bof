@@ -49,11 +49,35 @@ function childEnvironment(source, network) {
   if (network) {
     for (const name of NETWORK_ENVIRONMENT) allowed.add(name);
   }
-  const result = {};
+
+  const exact = new Map();
+  const variants = new Map();
+  const conflictingVariants = new Set();
   for (const [name, value] of Object.entries(source)) {
-    if (allowed.has(name.toUpperCase()) && value !== undefined) result[name] = value;
+    const canonical = name.toUpperCase();
+    if (!allowed.has(canonical) || value === undefined) continue;
+    if (name === canonical) {
+      exact.set(canonical, value);
+      continue;
+    }
+    if (variants.has(canonical) && variants.get(canonical) !== value) {
+      conflictingVariants.add(canonical);
+    } else if (!variants.has(canonical)) {
+      variants.set(canonical, value);
+    }
   }
-  if (!Object.keys(result).some((name) => name.toUpperCase() === 'PATH')) {
+
+  const result = {};
+  for (const name of allowed) {
+    if (exact.has(name)) {
+      result[name] = exact.get(name);
+    } else if (conflictingVariants.has(name)) {
+      throw new Error(`conflicting case variants for environment variable ${name}`);
+    } else if (variants.has(name)) {
+      result[name] = variants.get(name);
+    }
+  }
+  if (result.PATH === undefined) {
     throw new Error('PATH is required to launch the Go controller');
   }
   // Do not consult caller-controlled persistent Go configuration or ambient

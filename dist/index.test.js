@@ -26,7 +26,8 @@ test('childEnvironment passes only the controller allowlist', () => {
   };
   const acquisition = childEnvironment(source, true);
   assert.equal(acquisition.PATH, '/tools');
-  assert.equal(acquisition.LocalAppData, 'C:\\Users\\runner\\AppData\\Local');
+  assert.equal(acquisition.LOCALAPPDATA, 'C:\\Users\\runner\\AppData\\Local');
+  assert.equal(acquisition.LocalAppData, undefined);
   assert.equal(acquisition.HTTPS_PROXY, 'https://proxy.test');
   assert.equal(acquisition.GITHUB_TOKEN, undefined);
   assert.equal(acquisition['INPUT_GITHUB-TOKEN'], undefined);
@@ -41,6 +42,52 @@ test('childEnvironment passes only the controller allowlist', () => {
   assert.equal(execution.GOPROXY, 'off');
   assert.equal(execution.GOSUMDB, 'off');
   assert.equal(execution.GOTOOLCHAIN, 'local');
+});
+
+test('childEnvironment gives canonical names deterministic precedence', () => {
+  const canonical = {
+    PATH: '/trusted/tools',
+    RUNNER_TEMP: '/trusted/temp',
+  };
+  const variants = {
+    Path: '/attacker/tools',
+    Runner_Temp: '/attacker/temp',
+  };
+  for (const source of [
+    { ...canonical, ...variants },
+    { ...variants, ...canonical },
+  ]) {
+    const environment = childEnvironment(source, true);
+    assert.equal(environment.PATH, '/trusted/tools');
+    assert.equal(environment.RUNNER_TEMP, '/trusted/temp');
+    assert.equal(environment.Path, undefined);
+    assert.equal(environment.Runner_Temp, undefined);
+    assert.equal(Object.keys(environment).filter((name) => name.toUpperCase() === 'PATH').length, 1);
+    assert.equal(Object.keys(environment).filter((name) => name.toUpperCase() === 'RUNNER_TEMP').length, 1);
+  }
+
+  const windowsSpelling = childEnvironment({
+    Path: 'C:\\trusted\\bin',
+    Runner_Temp: 'C:\\trusted\\temp',
+  }, true);
+  assert.equal(windowsSpelling.PATH, 'C:\\trusted\\bin');
+  assert.equal(windowsSpelling.RUNNER_TEMP, 'C:\\trusted\\temp');
+
+  const emptyCanonical = childEnvironment({
+    Path: '/attacker/tools',
+    PATH: '',
+    Runner_Temp: '/attacker/temp',
+    RUNNER_TEMP: '',
+  }, true);
+  assert.equal(emptyCanonical.PATH, '');
+  assert.equal(emptyCanonical.RUNNER_TEMP, '');
+});
+
+test('childEnvironment rejects conflicting variants without a canonical name', () => {
+  assert.throws(() => childEnvironment({
+    Path: '/first/tools',
+    pAtH: '/second/tools',
+  }, true), /conflicting case variants for environment variable PATH/);
 });
 
 test('clearCredentialInputs overwrites and removes token inputs', () => {

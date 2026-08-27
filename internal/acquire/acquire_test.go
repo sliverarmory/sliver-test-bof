@@ -471,7 +471,8 @@ func TestCommandEnvPinsSourceToolchainAndCrossBuild(t *testing.T) {
 	t.Setenv("ACTIONS_RUNTIME_TOKEN", "must-not-leak")
 	t.Setenv("LocalAppData", filepath.Join(ambientGoRoot, "local-app-data"))
 	t.Setenv("APPDATA", filepath.Join(ambientGoRoot, "roaming-app-data"))
-	environment := commandEnv(true, "windows", "amd64", "go1.26.6")
+	environment, err := commandEnv(true, "windows", "amd64", "go1.26.6")
+	environment = mustCommandEnvironment(t, environment, err)
 	isolatedHome := filepath.Join(runnerTemp, "sliver-bof-e2e-go-home")
 	want := map[string]string{
 		"GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "0", "GOTOOLCHAIN": "go1.26.6+auto",
@@ -506,7 +507,7 @@ func TestCommandEnvPinsSourceToolchainAndCrossBuild(t *testing.T) {
 
 func TestCommandEnvProvidesPrivateCachesWithoutWindowsProfile(t *testing.T) {
 	runnerTemp := t.TempDir()
-	environment := commandEnvFrom([]string{
+	environment, err := commandEnvFrom([]string{
 		"Path=/trusted/tools",
 		"Runner_Temp=" + runnerTemp,
 		"GITHUB_TOKEN=github-secret",
@@ -519,6 +520,7 @@ func TestCommandEnvProvidesPrivateCachesWithoutWindowsProfile(t *testing.T) {
 		// GOCACHE and LocalAppData are intentionally absent, matching the
 		// Windows runner failure that reached the asset-preparation command.
 	}, false, "", "", "go1.26.6")
+	environment = mustCommandEnvironment(t, environment, err)
 	values := uniqueEnvironment(t, environment)
 	isolatedHome := filepath.Join(runnerTemp, "sliver-bof-e2e-go-home")
 	want := map[string]string{
@@ -568,29 +570,106 @@ func TestCommandEnvKeepsLinux386PreparationHostOnly(t *testing.T) {
 		"CGO_ENABLED=1",
 		"CC=/usr/bin/i686-linux-gnu-gcc",
 	}
-	assetEnvironment := uniqueEnvironment(t, commandEnvFrom(host, false, "", "", "go1.26.6"))
-	if assetEnvironment["CGO_ENABLED"] != "0" {
-		t.Fatalf("asset CGO_ENABLED = %q, want 0", assetEnvironment["CGO_ENABLED"])
+	assetEnvironment, err := commandEnvFrom(host, false, "", "", "go1.26.6")
+	assetValues := uniqueEnvironment(t, mustCommandEnvironment(t, assetEnvironment, err))
+	if assetValues["CGO_ENABLED"] != "0" {
+		t.Fatalf("asset CGO_ENABLED = %q, want 0", assetValues["CGO_ENABLED"])
 	}
 	for _, name := range []string{"GOOS", "GOARCH", "CC"} {
-		if _, ok := assetEnvironment[name]; ok {
+		if _, ok := assetValues[name]; ok {
 			t.Errorf("asset-preparation environment inherited target setting %s", name)
 		}
 	}
 
-	serverEnvironment := uniqueEnvironment(t, commandEnvFrom(host, true, "linux", "amd64", "go1.26.6"))
+	serverEnvironment, err := commandEnvFrom(host, true, "linux", "amd64", "go1.26.6")
+	serverValues := uniqueEnvironment(t, mustCommandEnvironment(t, serverEnvironment, err))
 	for name, expected := range map[string]string{
 		"CGO_ENABLED": "0",
 		"GOOS":        "linux",
 		"GOARCH":      "amd64",
 	} {
-		if got := serverEnvironment[name]; got != expected {
+		if got := serverValues[name]; got != expected {
 			t.Errorf("server %s = %q, want %q", name, got, expected)
 		}
 	}
-	if _, ok := serverEnvironment["CC"]; ok {
+	if _, ok := serverValues["CC"]; ok {
 		t.Error("server build inherited the i386 userspace C compiler")
 	}
+}
+
+func TestCommandEnvCanonicalNamesWinIndependentOfOrder(t *testing.T) {
+	trustedTemp := t.TempDir()
+	attackerTemp := t.TempDir()
+	canonical := []string{
+		"PATH=/trusted/tools",
+		"RUNNER_TEMP=" + trustedTemp,
+	}
+	variants := []string{
+		"Path=/attacker/tools",
+		"Runner_Temp=" + attackerTemp,
+	}
+	orders := [][]string{
+		append(append([]string(nil), canonical...), variants...),
+		append(append([]string(nil), variants...), canonical...),
+	}
+	for index, host := range orders {
+		environment, err := commandEnvFrom(host, false, "", "", "go1.26.6")
+		environment = mustCommandEnvironment(t, environment, err)
+		values := uniqueEnvironment(t, environment)
+		if values["PATH"] != "/trusted/tools" {
+			t.Errorf("order %d PATH = %q, want canonical value", index, values["PATH"])
+		}
+		isolatedHome := filepath.Join(trustedTemp, "sliver-bof-e2e-go-home")
+		for name, expected := range map[string]string{
+			"HOME":       isolatedHome,
+			"GOCACHE":    filepath.Join(isolatedHome, ".cache", "go-build"),
+			"GOPATH":     filepath.Join(isolatedHome, "go"),
+			"GOMODCACHE": filepath.Join(isolatedHome, "go", "pkg", "mod"),
+		} {
+			if got := values[name]; got != expected {
+				t.Errorf("order %d %s = %q, want %q", index, name, got, expected)
+			}
+		}
+	}
+}
+
+func TestCommandEnvRejectsConflictingVariantsWithoutCanonicalName(t *testing.T) {
+	_, err := commandEnvFrom([]string{
+		"Path=/first/tools",
+		"pAtH=/second/tools",
+		"RUNNER_TEMP=" + t.TempDir(),
+	}, false, "", "", "go1.26.6")
+	if err == nil || !strings.Contains(err.Error(), "conflicting case variants for environment variable PATH") {
+		t.Fatalf("commandEnvFrom() error = %v, want conflicting PATH variants", err)
+	}
+}
+
+func TestCommandEnvEmptyCanonicalNamesSuppressVariants(t *testing.T) {
+	fallbackTemp := t.TempDir()
+	environment, err := commandEnvFrom([]string{
+		"Path=/attacker/tools",
+		"PATH=",
+		"Runner_Temp=" + t.TempDir(),
+		"RUNNER_TEMP=",
+		"TMPDIR=" + fallbackTemp,
+	}, false, "", "", "go1.26.6")
+	environment = mustCommandEnvironment(t, environment, err)
+	values := uniqueEnvironment(t, environment)
+	if values["PATH"] != "" {
+		t.Fatalf("PATH = %q, want exact empty canonical value", values["PATH"])
+	}
+	wantHome := filepath.Join(fallbackTemp, "sliver-bof-e2e-go-home")
+	if values["HOME"] != wantHome {
+		t.Fatalf("HOME = %q, want TMPDIR fallback %q", values["HOME"], wantHome)
+	}
+}
+
+func mustCommandEnvironment(t *testing.T, environment []string, err error) []string {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("command environment: %v", err)
+	}
+	return environment
 }
 
 func uniqueEnvironment(t *testing.T, environment []string) map[string]string {
