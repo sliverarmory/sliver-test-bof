@@ -151,6 +151,33 @@ func TestObjectRootPropagatesThroughEveryExecutionBoundary(t *testing.T) {
 	}
 }
 
+func TestLinux386RouteKeepsTrustedToolsOnHostArchitecture(t *testing.T) {
+	dockerfile := readRepositoryFile(t, ".github/actions/run-linux-386/Dockerfile")
+	for _, fragment := range []string{
+		"FROM --platform=$BUILDPLATFORM golang:1.26.6-bookworm",
+		"CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
+		"FROM --platform=$TARGETPLATFORM debian:bookworm-slim",
+	} {
+		if !strings.Contains(dockerfile, fragment) {
+			t.Errorf("Linux/386 Dockerfile is missing host/target architecture contract %q", fragment)
+		}
+	}
+
+	runScript := readRepositoryFile(t, ".github/actions/run-linux-386/run.sh")
+	if !strings.Contains(runScript, "--platform linux/386") {
+		t.Fatal("Linux/386 route does not start an i386 userspace")
+	}
+	entrypoint := readRepositoryFile(t, ".github/actions/run-linux-386/entrypoint.sh")
+	if !strings.Contains(entrypoint, `--target "${SLIVER_BOF_TARGET}"`) {
+		t.Fatal("Linux/386 target is not passed as an implant/test selection")
+	}
+	for _, forbidden := range []string{"GOOS=", "GOARCH=", "CGO_ENABLED=", "CC="} {
+		if strings.Contains(entrypoint, forbidden) {
+			t.Errorf("Linux/386 entrypoint leaks target build setting %q into trusted host preparation", forbidden)
+		}
+	}
+}
+
 func TestPrepareCallerActionUsesScrubbedPlanEnvironment(t *testing.T) {
 	path := filepath.Join("..", "..", ".github", "actions", "prepare-caller", "action.yml")
 	data, err := os.ReadFile(path)

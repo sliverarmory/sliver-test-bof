@@ -716,50 +716,70 @@ func discoverToolchain(ctx context.Context, goPath string, goMod []byte, require
 }
 
 func commandEnv(build bool, goos, goarch, requiredToolchain string) []string {
+	return commandEnvFrom(os.Environ(), build, goos, goarch, requiredToolchain)
+}
+
+func commandEnvFrom(hostEnvironment []string, build bool, goos, goarch, requiredToolchain string) []string {
 	allowed := []string{
 		"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
 		"TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "TZ",
 		"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
-		"GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GONOPROXY", "GONOSUMDB", "GOSUMDB",
+		"GOPROXY", "GONOPROXY", "GONOSUMDB", "GOSUMDB",
 	}
 	host := make(map[string]string, len(allowed))
-	for _, item := range os.Environ() {
+	for _, item := range hostEnvironment {
 		name, value, found := strings.Cut(item, "=")
 		if found {
 			host[strings.ToUpper(name)] = value
 		}
 	}
-	environment := make([]string, 0, len(allowed)+12)
+	environment := make([]string, 0, len(allowed)+16)
 	for _, name := range allowed {
 		if value, ok := host[name]; ok {
 			environment = append(environment, name+"="+value)
 		}
 	}
-	homeRoot := strings.TrimSpace(host["TMPDIR"])
+	homeRoot := strings.TrimSpace(host["RUNNER_TEMP"])
+	if homeRoot == "" {
+		homeRoot = strings.TrimSpace(host["TMPDIR"])
+	}
 	if homeRoot == "" {
 		homeRoot = strings.TrimSpace(host["TEMP"])
 	}
 	if homeRoot == "" {
 		homeRoot = strings.TrimSpace(host["TMP"])
 	}
-	if runnerTemp := strings.TrimSpace(os.Getenv("RUNNER_TEMP")); runnerTemp != "" {
-		homeRoot = runnerTemp
-	}
 	if homeRoot == "" {
 		homeRoot = os.TempDir()
 	}
+	if absoluteRoot, err := filepath.Abs(homeRoot); err == nil {
+		homeRoot = absoluteRoot
+	} else {
+		homeRoot = os.TempDir()
+	}
 	isolatedHome := filepath.Join(homeRoot, "sliver-bof-e2e-go-home")
+	goPath := filepath.Join(isolatedHome, "go")
 	environment = append(environment,
 		"HOME="+isolatedHome,
 		"USERPROFILE="+isolatedHome,
 		"XDG_CONFIG_HOME="+filepath.Join(isolatedHome, ".config"),
+		// Never depend on Windows LocalAppData or caller/self-hosted Go
+		// caches. These canonical action-private paths also prevent
+		// case-variant environment keys from selecting a different cache.
+		"GOCACHE="+filepath.Join(isolatedHome, ".cache", "go-build"),
+		"GOPATH="+goPath,
+		"GOMODCACHE="+filepath.Join(goPath, "pkg", "mod"),
 		"GOENV=off",
 		"GOWORK=off",
 		"GOFLAGS=",
 		"GOTOOLCHAIN="+requiredToolchain+"+auto",
+		// Asset generation must stay a pure-Go host command. In the
+		// Linux/386 route an amd64 Go toolchain intentionally runs inside
+		// an i386 userspace whose native C compiler cannot build amd64 cgo.
+		"CGO_ENABLED=0",
 	)
 	if build {
-		environment = append(environment, "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch)
+		environment = append(environment, "GOOS="+goos, "GOARCH="+goarch)
 		switch goarch {
 		case "386":
 			environment = append(environment, "GO386=sse2")

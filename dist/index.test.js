@@ -17,6 +17,7 @@ test('childEnvironment passes only the controller allowlist', () => {
     PATH: '/tools',
     HOME: '/private/home',
     RUNNER_TEMP: '/private/temp',
+    LocalAppData: 'C:\\Users\\runner\\AppData\\Local',
     HTTPS_PROXY: 'https://proxy.test',
     GITHUB_TOKEN: 'secret-token',
     'INPUT_GITHUB-TOKEN': 'secret-input',
@@ -25,6 +26,7 @@ test('childEnvironment passes only the controller allowlist', () => {
   };
   const acquisition = childEnvironment(source, true);
   assert.equal(acquisition.PATH, '/tools');
+  assert.equal(acquisition.LocalAppData, 'C:\\Users\\runner\\AppData\\Local');
   assert.equal(acquisition.HTTPS_PROXY, 'https://proxy.test');
   assert.equal(acquisition.GITHUB_TOKEN, undefined);
   assert.equal(acquisition['INPUT_GITHUB-TOKEN'], undefined);

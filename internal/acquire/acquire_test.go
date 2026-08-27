@@ -448,9 +448,18 @@ func TestLoaderManifestParsingIsStrict(t *testing.T) {
 }
 
 func TestCommandEnvPinsSourceToolchainAndCrossBuild(t *testing.T) {
+	runnerTemp := t.TempDir()
+	ambientGoRoot := t.TempDir()
+	t.Setenv("RUNNER_TEMP", runnerTemp)
 	t.Setenv("GOOS", "attacker-os")
 	t.Setenv("GOARCH", "attacker-arch")
 	t.Setenv("CGO_ENABLED", "1")
+	t.Setenv("GOCACHE", filepath.Join(ambientGoRoot, "cache"))
+	t.Setenv("GOMODCACHE", filepath.Join(ambientGoRoot, "mod"))
+	t.Setenv("GOPATH", ambientGoRoot)
+	t.Setenv("GoCache", filepath.Join(ambientGoRoot, "case-variant-cache"))
+	t.Setenv("GoModCache", filepath.Join(ambientGoRoot, "case-variant-mod"))
+	t.Setenv("GoPath", filepath.Join(ambientGoRoot, "case-variant-path"))
 	// A newer launcher/default must not silently compile Sliver with a newer
 	// standard library than the vendored source expects.
 	t.Setenv("GOTOOLCHAIN", "go1.27.0+auto")
@@ -459,15 +468,29 @@ func TestCommandEnvPinsSourceToolchainAndCrossBuild(t *testing.T) {
 	t.Setenv("GOENV", "/tmp/attacker.env")
 	t.Setenv("GOAMD64", "v4")
 	t.Setenv("GITHUB_TOKEN", "must-not-leak")
+	t.Setenv("ACTIONS_RUNTIME_TOKEN", "must-not-leak")
+	t.Setenv("LocalAppData", filepath.Join(ambientGoRoot, "local-app-data"))
+	t.Setenv("APPDATA", filepath.Join(ambientGoRoot, "roaming-app-data"))
 	environment := commandEnv(true, "windows", "amd64", "go1.26.6")
+	isolatedHome := filepath.Join(runnerTemp, "sliver-bof-e2e-go-home")
 	want := map[string]string{
 		"GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "0", "GOTOOLCHAIN": "go1.26.6+auto",
 		"GOAMD64": "v1", "GOFLAGS": "", "GOWORK": "off", "GOENV": "off",
+		"HOME": isolatedHome, "USERPROFILE": isolatedHome,
+		"GOCACHE":    filepath.Join(isolatedHome, ".cache", "go-build"),
+		"GOPATH":     filepath.Join(isolatedHome, "go"),
+		"GOMODCACHE": filepath.Join(isolatedHome, "go", "pkg", "mod"),
 	}
+	seen := make(map[string]struct{}, len(environment))
 	for _, item := range environment {
 		name, value, _ := strings.Cut(item, "=")
-		if name == "GITHUB_TOKEN" {
-			t.Fatal("GITHUB_TOKEN leaked into source build environment")
+		name = strings.ToUpper(name)
+		if _, duplicate := seen[name]; duplicate {
+			t.Fatalf("duplicate case-insensitive environment entry %s", name)
+		}
+		seen[name] = struct{}{}
+		if name == "GITHUB_TOKEN" || name == "ACTIONS_RUNTIME_TOKEN" || name == "LOCALAPPDATA" || name == "APPDATA" {
+			t.Fatalf("%s leaked into source build environment", name)
 		}
 		if expected, ok := want[name]; ok {
 			if value != expected {
@@ -479,6 +502,112 @@ func TestCommandEnvPinsSourceToolchainAndCrossBuild(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("missing command environment entries: %v", want)
 	}
+}
+
+func TestCommandEnvProvidesPrivateCachesWithoutWindowsProfile(t *testing.T) {
+	runnerTemp := t.TempDir()
+	environment := commandEnvFrom([]string{
+		"Path=/trusted/tools",
+		"Runner_Temp=" + runnerTemp,
+		"GITHUB_TOKEN=github-secret",
+		"ACTIONS_RUNTIME_TOKEN=actions-secret",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN=oidc-secret",
+		"AWS_SECRET_ACCESS_KEY=cloud-secret",
+		"GIT_CONFIG_COUNT=1",
+		"GOAUTH=netrc",
+		"SSH_AUTH_SOCK=/private/agent.sock",
+		// GOCACHE and LocalAppData are intentionally absent, matching the
+		// Windows runner failure that reached the asset-preparation command.
+	}, false, "", "", "go1.26.6")
+	values := uniqueEnvironment(t, environment)
+	isolatedHome := filepath.Join(runnerTemp, "sliver-bof-e2e-go-home")
+	want := map[string]string{
+		"PATH":            "/trusted/tools",
+		"HOME":            isolatedHome,
+		"USERPROFILE":     isolatedHome,
+		"XDG_CONFIG_HOME": filepath.Join(isolatedHome, ".config"),
+		"GOCACHE":         filepath.Join(isolatedHome, ".cache", "go-build"),
+		"GOPATH":          filepath.Join(isolatedHome, "go"),
+		"GOMODCACHE":      filepath.Join(isolatedHome, "go", "pkg", "mod"),
+		"CGO_ENABLED":     "0",
+	}
+	for name, expected := range want {
+		if got := values[name]; got != expected {
+			t.Errorf("%s = %q, want %q", name, got, expected)
+		}
+	}
+	for _, name := range []string{
+		"LOCALAPPDATA", "APPDATA", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN", "AWS_SECRET_ACCESS_KEY", "GIT_CONFIG_COUNT",
+		"GOAUTH", "SSH_AUTH_SOCK", "GOOS", "GOARCH",
+	} {
+		if _, ok := values[name]; ok {
+			t.Errorf("%s leaked into asset-preparation environment", name)
+		}
+	}
+	for _, name := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "GOCACHE", "GOPATH", "GOMODCACHE"} {
+		value := values[name]
+		if !filepath.IsAbs(value) {
+			t.Errorf("%s = %q, want absolute path", name, value)
+			continue
+		}
+		relative, err := filepath.Rel(runnerTemp, value)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			t.Errorf("%s = %q, want path contained by RUNNER_TEMP %q", name, value, runnerTemp)
+		}
+	}
+}
+
+func TestCommandEnvKeepsLinux386PreparationHostOnly(t *testing.T) {
+	runnerTemp := t.TempDir()
+	host := []string{
+		"PATH=/usr/local/go/bin:/usr/bin:/bin",
+		"RUNNER_TEMP=" + runnerTemp,
+		"GOOS=linux",
+		"GOARCH=386",
+		"CGO_ENABLED=1",
+		"CC=/usr/bin/i686-linux-gnu-gcc",
+	}
+	assetEnvironment := uniqueEnvironment(t, commandEnvFrom(host, false, "", "", "go1.26.6"))
+	if assetEnvironment["CGO_ENABLED"] != "0" {
+		t.Fatalf("asset CGO_ENABLED = %q, want 0", assetEnvironment["CGO_ENABLED"])
+	}
+	for _, name := range []string{"GOOS", "GOARCH", "CC"} {
+		if _, ok := assetEnvironment[name]; ok {
+			t.Errorf("asset-preparation environment inherited target setting %s", name)
+		}
+	}
+
+	serverEnvironment := uniqueEnvironment(t, commandEnvFrom(host, true, "linux", "amd64", "go1.26.6"))
+	for name, expected := range map[string]string{
+		"CGO_ENABLED": "0",
+		"GOOS":        "linux",
+		"GOARCH":      "amd64",
+	} {
+		if got := serverEnvironment[name]; got != expected {
+			t.Errorf("server %s = %q, want %q", name, got, expected)
+		}
+	}
+	if _, ok := serverEnvironment["CC"]; ok {
+		t.Error("server build inherited the i386 userspace C compiler")
+	}
+}
+
+func uniqueEnvironment(t *testing.T, environment []string) map[string]string {
+	t.Helper()
+	values := make(map[string]string, len(environment))
+	for _, item := range environment {
+		name, value, found := strings.Cut(item, "=")
+		if !found || strings.TrimSpace(name) == "" {
+			t.Fatalf("invalid environment entry %q", item)
+		}
+		name = strings.ToUpper(name)
+		if _, duplicate := values[name]; duplicate {
+			t.Fatalf("duplicate case-insensitive environment entry %s", name)
+		}
+		values[name] = value
+	}
+	return values
 }
 
 func TestRequiredGoToolchainPinsModuleVersion(t *testing.T) {
