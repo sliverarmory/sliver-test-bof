@@ -24,7 +24,7 @@ jobs:
         with:
           go-version: 1.26.6
           cache: false
-      - run: go test -tags=client,go_sqlite ./...
+      - run: go test -tags="client,go_sqlite" ./...
 
   node:
     name: Node tests (Ubuntu)
