@@ -885,7 +885,7 @@ func (runner *runtimeHarness) close() error {
 		}
 	}
 	if runner.workDir != "" {
-		if err := os.RemoveAll(runner.workDir); err != nil {
+		if err := removeWorkDir(runner.workDir); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		} else if err := runner.tracker.removeTempDir(runner.workDir); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove work directory from cleanup state: %w", err))
