@@ -86,7 +86,8 @@ type Collection struct {
 }
 
 type Settings struct {
-	BOFExecutor    string        `json:"bof_executor"`
+	BOFExecutor    string        `json:"bof_executor,omitempty"`
+	BOFExecutors   []string      `json:"bof_executors,omitempty"`
 	Entrypoint     string        `json:"entrypoint"`
 	Modes          []string      `json:"modes"`
 	Repeat         int           `json:"repeat"`

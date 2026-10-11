@@ -7,7 +7,7 @@ The repository exposes two interfaces:
 - The reusable workflow plans and runs every `os/arch` suite on an appropriate GitHub-hosted runner.
 - The root action runs one target in the caller's existing job, so a repository can own its build and matrix.
 
-This is an initial implementation. Pin it to a full commit SHA in required CI and validate it on non-production BOFs before expanding its use.
+Use the versioned `v0.1.0` release in a caller workflow. For required checks, pin the full commit SHA associated with that release. Validate the action on non-production BOFs before expanding its use. The project is available under the [MIT license](LICENSE).
 
 The initial reusable workflow and direct action are GitHub.com-only. They use GitHub's `$/` self-repository action references; the workflow also uses exact `job.workflow_repository`/`job.workflow_sha` identity and the GitHub.com-only artifact action generations (`upload-artifact` v7 and `download-artifact` v8). They are not currently compatible with GitHub Enterprise Server.
 
@@ -28,12 +28,12 @@ permissions:
 
 jobs:
   bof-e2e:
-    uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@main
+    uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@v0.1.0
     with:
       manifest: .github/sliver-bof-e2e.yml
 ```
 
-Use `@main` only while evaluating the initial version. Replace it with a full action commit SHA for stable or required checks.
+The version tag provides a stable, easy-to-read reference. Replace it with the release commit SHA when a required check must pin the exact action code.
 
 The planner validates the manifest, resolves the mutable Sliver selector once, and emits a dynamic matrix. Every matrix job therefore tests the same Sliver revision. Omitting the reusable workflow's `sliver-version` input makes `sliver.version` in the manifest authoritative; a non-empty workflow input overrides it. The workflow uses this allowlisted mapping:
 
@@ -59,7 +59,7 @@ Pass a trusted Bash command that produces every object referenced by a test or c
 ```yaml
 jobs:
   bof-e2e:
-    uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@main
+    uses: sliverarmory/sliver-test-bof/.github/workflows/e2e.yml@v0.1.0
     with:
       manifest: .github/sliver-bof-e2e.yml
       prepare-command: ./scripts/build-all-bofs.sh
@@ -117,13 +117,13 @@ suites:
     tests:
       - name: whoami
         object: build/windows/amd64/whoami.o
+        bof_executors: [reflektor, coff-loader]
         args:
           - type: wstring
             value: example
         expect:
           output:
-            contains: [UserName, SID]
-            matches: ['(?m)^Privilege Name']
+            contains: [UserName]
 
       - name: loopback-probe
         object: build/windows/amd64/probe.o
@@ -174,7 +174,7 @@ suites:
 
 Manifest object and `file` argument paths are relative. In the reusable workflow, objects resolve from the planner-created private object root and object symlinks are rejected; `file` arguments resolve from the caller workspace. Direct root-action use resolves both from the caller workspace and preserves confined in-workspace object symlinks. Any symlink that resolves outside its permitted root is rejected. A collection expands its glob into one test per object; overrides are keyed by object basename.
 
-Settings may be placed on an individual test or collection. Collection overrides replace only the fields they name; an overridden `expect` replaces the whole inherited expectation, and `args` and `args_raw_base64` clear one another. The top-level `defaults` supports `bof_executor`, `entrypoint`, `modes`, `repeat`, and `command_timeout`.
+Settings may be placed on an individual test or collection. Collection overrides replace only the fields they name; an overridden `expect` replaces the whole inherited expectation, and `args` and `args_raw_base64` clear one another. The top-level `defaults` supports `bof_executor` or `bof_executors`, `entrypoint`, `modes`, `repeat`, and `command_timeout`.
 
 ### Arguments
 
@@ -221,10 +221,14 @@ Use `expect.success_only: true` when the BOF has no stable content to assert. Ot
 
 ## Executor selection
 
-Executor selection is explicit per default, collection, or test. The action does not silently fall back between routes.
+Executor selection is explicit in `defaults`, a test, a collection, or a collection override. Use `bof_executor` for one route, or `bof_executors: [reflektor, coff-loader]` to run the same BOF through both routes. A plural list may also contain one route. The two fields are mutually exclusive in the same settings block; a selection at a more specific level replaces the inherited selection. The existing singular field keeps its behavior. The action does not silently fall back between routes.
+
+With both routes selected, each executor receives the same object, arguments, modes, repeats, and assertions. The report records separate results for each executor, mode, and repeat. Dual execution requires `windows/386` or `windows/amd64`, the targets supported by the pinned Armory COFFLoader package. A target without the requested loader fails instead of being counted as compatible.
+
+For a compatibility check, assert a recognizable BOF output value with `expect.output` on both routes. `success_only: true` can miss legacy loader errors that appear only in captured output.
 
 - `reflektor` uses Sliver's built-in BOF request (`CallExtensionReq.IsBOF`) and requires the connected implant to advertise the `bof_v1` capability. A missing capability is a preflight failure.
-- `coff-loader` registers and calls the legacy COFFLoader extension. The built-in acquisition path is limited to supported Windows targets; incompatible target/loader combinations fail before execution.
+- `coff-loader` acquires the pinned, signed Sliver Armory COFFLoader package, registers its extension, and calls its `LoadAndRun` export through Sliver gRPC. The package supplies `windows/386` and `windows/amd64` artifacts; incompatible target/loader combinations fail before execution.
 
 Beacon invocations wait for the matching `beacon-taskresult`, fetch the completed task content, and decode the final extension response. Receipt of only the initial asynchronous RPC response is not considered a successful BOF run.
 
@@ -274,7 +278,7 @@ jobs:
       - name: Build BOFs
         run: make bofs
       - name: Test BOFs
-        uses: sliverarmory/sliver-test-bof@main
+        uses: sliverarmory/sliver-test-bof@v0.1.0
         with:
           manifest: .github/sliver-bof-e2e.yml
           target: ${{ matrix.target }}

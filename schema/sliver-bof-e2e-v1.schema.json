@@ -72,13 +72,22 @@
       "additionalProperties": false,
       "properties": {
         "bof_executor": { "$ref": "#/$defs/executor" },
+        "bof_executors": { "$ref": "#/$defs/executors" },
         "entrypoint": { "type": "string", "minLength": 1 },
         "modes": { "$ref": "#/$defs/modes" },
         "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "command_timeout": { "type": "string", "minLength": 1 }
-      }
+      },
+      "not": { "required": ["bof_executor", "bof_executors"] }
     },
     "executor": { "enum": ["reflektor", "coff-loader"] },
+    "executors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/executor" }
+    },
     "modes": {
       "type": "array",
       "minItems": 1,
@@ -186,6 +195,7 @@
         "name": { "type": "string", "minLength": 1 },
         "object": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).*\\.o$" },
         "bof_executor": { "$ref": "#/$defs/executor" },
+        "bof_executors": { "$ref": "#/$defs/executors" },
         "entrypoint": { "type": "string", "minLength": 1 },
         "modes": { "$ref": "#/$defs/modes" },
         "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
@@ -196,6 +206,7 @@
         "expect": { "$ref": "#/$defs/expect" }
       },
       "allOf": [
+        { "not": { "required": ["bof_executor", "bof_executors"] } },
         { "not": { "required": ["args", "args_raw_base64"] } },
         {
           "if": { "required": ["tcp_listener"] },
@@ -211,6 +222,7 @@
       "additionalProperties": false,
       "properties": {
         "bof_executor": { "$ref": "#/$defs/executor" },
+        "bof_executors": { "$ref": "#/$defs/executors" },
         "entrypoint": { "type": "string", "minLength": 1 },
         "modes": { "$ref": "#/$defs/modes" },
         "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
@@ -221,6 +233,7 @@
         "expect": { "$ref": "#/$defs/expect" }
       },
       "allOf": [
+        { "not": { "required": ["bof_executor", "bof_executors"] } },
         { "not": { "required": ["args", "args_raw_base64"] } },
         {
           "if": { "required": ["tcp_listener"] },
@@ -238,6 +251,7 @@
         "name": { "type": "string", "minLength": 1 },
         "glob": { "type": "string", "minLength": 1 },
         "bof_executor": { "$ref": "#/$defs/executor" },
+        "bof_executors": { "$ref": "#/$defs/executors" },
         "entrypoint": { "type": "string", "minLength": 1 },
         "modes": { "$ref": "#/$defs/modes" },
         "repeat": { "type": "integer", "minimum": 1, "maximum": 1000 },
@@ -252,6 +266,7 @@
         }
       },
       "allOf": [
+        { "not": { "required": ["bof_executor", "bof_executors"] } },
         { "not": { "required": ["args", "args_raw_base64"] } },
         {
           "if": { "required": ["tcp_listener"] },

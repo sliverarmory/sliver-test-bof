@@ -124,7 +124,7 @@ func normalize(raw rawConfig, paths, objects pathResolver) (Config, []Plan, erro
 				Target:     target,
 				Settings:   cloneSettings(settings),
 			}
-			if err := appendUniquePlan(&plans, planIDs, plan); err != nil {
+			if err := appendExecutorPlans(&plans, planIDs, plan, testWhere); err != nil {
 				return Config{}, nil, err
 			}
 		}
@@ -179,7 +179,7 @@ func normalize(raw rawConfig, paths, objects pathResolver) (Config, []Plan, erro
 					Target:     target,
 					Settings:   settings,
 				}
-				if err := appendUniquePlan(&plans, planIDs, plan); err != nil {
+				if err := appendExecutorPlans(&plans, planIDs, plan, collectionWhere+" object "+match.basename); err != nil {
 					return Config{}, nil, err
 				}
 			}
@@ -300,8 +300,14 @@ func normalizeDefaults(raw rawDefaults) (Settings, error) {
 		Repeat:         1,
 		CommandTimeout: 2 * time.Minute,
 	}
+	if raw.BOFExecutor != nil && raw.BOFExecutors != nil {
+		return Settings{}, fmt.Errorf("defaults cannot set both bof_executor and bof_executors")
+	}
 	if raw.BOFExecutor != nil {
 		settings.BOFExecutor = *raw.BOFExecutor
+	} else if raw.BOFExecutors != nil {
+		settings.BOFExecutor = ""
+		settings.BOFExecutors = append([]string{}, (*raw.BOFExecutors)...)
 	}
 	if raw.Entrypoint != nil {
 		settings.Entrypoint = *raw.Entrypoint
@@ -327,8 +333,15 @@ func normalizeDefaults(raw rawDefaults) (Settings, error) {
 
 func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, fixtureVariables map[string]struct{}, where string) (Settings, error) {
 	settings := cloneSettings(base)
+	if raw.BOFExecutor != nil && raw.BOFExecutors != nil {
+		return Settings{}, fmt.Errorf("%s cannot set both bof_executor and bof_executors", where)
+	}
 	if raw.BOFExecutor != nil {
 		settings.BOFExecutor = *raw.BOFExecutor
+		settings.BOFExecutors = nil
+	} else if raw.BOFExecutors != nil {
+		settings.BOFExecutor = ""
+		settings.BOFExecutors = append([]string{}, (*raw.BOFExecutors)...)
 	}
 	if raw.Entrypoint != nil {
 		settings.Entrypoint = *raw.Entrypoint
@@ -394,10 +407,29 @@ func normalizeSettings(base Settings, raw rawSettings, paths pathResolver, fixtu
 }
 
 func validateCoreSettings(settings Settings, where string) error {
-	switch settings.BOFExecutor {
-	case ExecutorReflektor, ExecutorCOFFLoader:
-	default:
-		return fmt.Errorf("%s.bof_executor must be %q or %q", where, ExecutorReflektor, ExecutorCOFFLoader)
+	if settings.BOFExecutors != nil {
+		if settings.BOFExecutor != "" {
+			return fmt.Errorf("%s cannot set both bof_executor and bof_executors", where)
+		}
+		if len(settings.BOFExecutors) == 0 || len(settings.BOFExecutors) > 2 {
+			return fmt.Errorf("%s.bof_executors must contain one or two executors", where)
+		}
+		seenExecutors := make(map[string]struct{}, len(settings.BOFExecutors))
+		for _, executor := range settings.BOFExecutors {
+			if executor != ExecutorReflektor && executor != ExecutorCOFFLoader {
+				return fmt.Errorf("%s.bof_executors contains %q; only %q and %q are supported", where, executor, ExecutorReflektor, ExecutorCOFFLoader)
+			}
+			if _, exists := seenExecutors[executor]; exists {
+				return fmt.Errorf("%s.bof_executors contains duplicate executor %q", where, executor)
+			}
+			seenExecutors[executor] = struct{}{}
+		}
+	} else {
+		switch settings.BOFExecutor {
+		case ExecutorReflektor, ExecutorCOFFLoader:
+		default:
+			return fmt.Errorf("%s.bof_executor must be %q or %q", where, ExecutorReflektor, ExecutorCOFFLoader)
+		}
 	}
 	if strings.TrimSpace(settings.Entrypoint) == "" || strings.ContainsRune(settings.Entrypoint, '\x00') {
 		return fmt.Errorf("%s.entrypoint must be a non-empty string without NUL bytes", where)
@@ -622,6 +654,9 @@ func hasOutputExpectation(output OutputExpectation) bool {
 
 func cloneSettings(input Settings) Settings {
 	output := input
+	if input.BOFExecutors != nil {
+		output.BOFExecutors = append([]string{}, input.BOFExecutors...)
+	}
 	if input.TCPListener != nil {
 		listener := *input.TCPListener
 		output.TCPListener = &listener
@@ -684,5 +719,31 @@ func appendUniquePlan(plans *[]Plan, ids map[string]struct{}, plan Plan) error {
 	}
 	ids[plan.ID] = struct{}{}
 	*plans = append(*plans, plan)
+	return nil
+}
+
+// appendExecutorPlans turns one object specification into one concrete plan per
+// requested loader. A multi-loader plan needs distinct IDs because report
+// coverage and captured-output paths are keyed by plan ID.
+func appendExecutorPlans(plans *[]Plan, ids map[string]struct{}, plan Plan, where string) error {
+	executors := plan.Settings.BOFExecutors
+	if executors == nil {
+		executors = []string{plan.Settings.BOFExecutor}
+	}
+	for _, executor := range executors {
+		if executor == ExecutorCOFFLoader && (plan.Target.OS != "windows" || plan.Target.Arch != "386" && plan.Target.Arch != "amd64") {
+			return fmt.Errorf("%s: executor %q supports only windows/386 and windows/amd64, not %s", where, executor, plan.Target.Key())
+		}
+		expanded := plan
+		expanded.Settings = cloneSettings(plan.Settings)
+		expanded.Settings.BOFExecutor = executor
+		expanded.Settings.BOFExecutors = nil
+		if len(executors) > 1 {
+			expanded.ID += "/" + executor
+		}
+		if err := appendUniquePlan(plans, ids, expanded); err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -129,6 +129,212 @@ suites:
 	}
 }
 
+func TestLoadExpandsPluralBOFExecutorsAndPreservesScalarIDs(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/shared.o", 0x8664)
+	path := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: both
+        object: objects/shared.o
+        bof_executors: [reflektor, coff-loader]
+        modes: [session, beacon]
+        repeat: 2
+        args: [{type: string, value: shared}]
+        expect: {output: {contains: [shared]}}
+      - name: singular
+        object: objects/shared.o
+        bof_executor: coff-loader
+        expect: {success_only: true}
+      - name: implicit
+        object: objects/shared.o
+        expect: {success_only: true}
+      - name: singleton-list
+        object: objects/shared.o
+        bof_executors: [coff-loader]
+        expect: {success_only: true}
+`)
+	loaded, err := Load(path, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Plans) != 5 {
+		t.Fatalf("len(Plans) = %d, want 5", len(loaded.Plans))
+	}
+	want := map[string]string{
+		"suite/both/reflektor":   ExecutorReflektor,
+		"suite/both/coff-loader": ExecutorCOFFLoader,
+		"suite/singular":         ExecutorCOFFLoader,
+		"suite/implicit":         ExecutorReflektor,
+		"suite/singleton-list":   ExecutorCOFFLoader,
+	}
+	seen := make(map[string]struct{}, len(want))
+	for _, plan := range loaded.Plans {
+		executor, ok := want[plan.ID]
+		if !ok {
+			t.Errorf("unexpected plan ID %q", plan.ID)
+			continue
+		}
+		if _, exists := seen[plan.ID]; exists {
+			t.Errorf("duplicate plan ID %q", plan.ID)
+		}
+		seen[plan.ID] = struct{}{}
+		if plan.Settings.BOFExecutor != executor || plan.ObjectPath != "objects/shared.o" {
+			t.Errorf("plan %q = executor %q, object %q", plan.ID, plan.Settings.BOFExecutor, plan.ObjectPath)
+		}
+		if plan.Name == "both" && (plan.Settings.Repeat != 2 || !equalStrings(plan.Settings.Modes, []string{ModeSession, ModeBeacon}) || len(plan.Settings.Args) != 1 || !equalStrings(plan.Settings.Expect.Output.Contains, []string{"shared"})) {
+			t.Errorf("dual executor settings differ from manifest: %#v", plan.Settings)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("seen plan IDs = %v, want %v", seen, want)
+	}
+}
+
+func TestLoadExpandsCollectionBOFExecutorsWithOverride(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "objects/a.o", 0x8664)
+	writeCOFFObject(t, workspace, "objects/b.o", 0x8664)
+	path := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    collections:
+      - name: broad
+        glob: objects/*.o
+        bof_executors: [reflektor, coff-loader]
+        expect: {success_only: true}
+        overrides:
+          a.o:
+            bof_executors: [coff-loader]
+      - name: selected
+        glob: objects/*.o
+        bof_executor: reflektor
+        expect: {success_only: true}
+        overrides:
+          b.o:
+            bof_executors: [reflektor, coff-loader]
+`)
+	loaded, err := Load(path, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"suite/broad/a.o":                ExecutorCOFFLoader,
+		"suite/broad/b.o/reflektor":      ExecutorReflektor,
+		"suite/broad/b.o/coff-loader":    ExecutorCOFFLoader,
+		"suite/selected/a.o":             ExecutorReflektor,
+		"suite/selected/b.o/reflektor":   ExecutorReflektor,
+		"suite/selected/b.o/coff-loader": ExecutorCOFFLoader,
+	}
+	if len(loaded.Plans) != len(want) {
+		t.Fatalf("len(Plans) = %d, want %d", len(loaded.Plans), len(want))
+	}
+	for _, plan := range loaded.Plans {
+		executor, ok := want[plan.ID]
+		if !ok {
+			t.Errorf("unexpected plan ID %q", plan.ID)
+			continue
+		}
+		if plan.Settings.BOFExecutor != executor {
+			t.Errorf("plan %q executor = %q, want %q", plan.ID, plan.Settings.BOFExecutor, executor)
+		}
+		delete(want, plan.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing collection plans: %v", want)
+	}
+}
+
+func TestLoadInheritsPluralBOFExecutorDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "shared.o", 0x8664)
+	path := writeManifest(t, workspace, `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+defaults:
+  bof_executors: [reflektor, coff-loader]
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: inherited
+        object: shared.o
+        expect: {success_only: true}
+      - name: narrowed
+        object: shared.o
+        bof_executor: reflektor
+        expect: {success_only: true}
+`)
+	loaded, err := Load(path, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"suite/inherited/reflektor":   ExecutorReflektor,
+		"suite/inherited/coff-loader": ExecutorCOFFLoader,
+		"suite/narrowed":              ExecutorReflektor,
+	}
+	if len(loaded.Plans) != len(want) {
+		t.Fatalf("len(Plans) = %d, want %d", len(loaded.Plans), len(want))
+	}
+	for _, plan := range loaded.Plans {
+		if executor, ok := want[plan.ID]; !ok || plan.Settings.BOFExecutor != executor {
+			t.Errorf("unexpected inherited plan: ID %q executor %q", plan.ID, plan.Settings.BOFExecutor)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidPluralBOFExecutors(t *testing.T) {
+	workspace := t.TempDir()
+	writeCOFFObject(t, workspace, "test.o", 0x8664)
+	writeCOFFObject(t, workspace, "arm64.o", 0xaa64)
+	base := `
+schema: sliver-bof-e2e/v1
+sliver: {version: master}
+suites:
+  - name: suite
+    target: {os: windows, arch: amd64}
+    tests:
+      - name: test
+        object: test.o
+        bof_executors: [reflektor, coff-loader]
+        expect: {success_only: true}
+`
+	tests := []struct {
+		name, manifest string
+		want           []string
+	}{
+		{"empty", strings.Replace(base, "[reflektor, coff-loader]", "[]", 1), []string{"bof_executors"}},
+		{"too many", strings.Replace(base, "[reflektor, coff-loader]", "[reflektor, coff-loader, reflektor]", 1), []string{"bof_executors"}},
+		{"duplicate", strings.Replace(base, "[reflektor, coff-loader]", "[reflektor, reflektor]", 1), []string{"bof_executors", "duplicate"}},
+		{"unknown", strings.Replace(base, "[reflektor, coff-loader]", "[reflektor, auto]", 1), []string{"bof_executors", "auto"}},
+		{"scalar and plural", strings.Replace(base, "        bof_executors:", "        bof_executor: reflektor\n        bof_executors:", 1), []string{"bof_executor", "bof_executors"}},
+		{"defaults scalar and plural", strings.Replace(base, "suites:\n", "defaults: {bof_executor: reflektor, bof_executors: [coff-loader]}\nsuites:\n", 1), []string{"bof_executor", "bof_executors"}},
+		{"unsupported target", strings.Replace(strings.Replace(base, "windows, arch: amd64", "windows, arch: arm64", 1), "object: test.o", "object: arm64.o", 1), []string{"coff-loader", "windows/arm64"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeManifest(t, workspace, test.manifest)
+			_, err := Load(path, workspace)
+			if err == nil {
+				t.Fatal("Load() unexpectedly accepted invalid bof_executors")
+			}
+			for _, want := range test.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Load() error = %v, want substring %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestMatrixUsesUniqueDeterministicTargetOrder(t *testing.T) {
 	loaded := &Manifest{Plans: []Plan{
 		{Target: Target{OS: "windows", Arch: "amd64"}},

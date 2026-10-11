@@ -31,6 +31,7 @@ type rawSliverConfig struct {
 
 type rawDefaults struct {
 	BOFExecutor    *string   `yaml:"bof_executor"`
+	BOFExecutors   *[]string `yaml:"bof_executors"`
 	Entrypoint     *string   `yaml:"entrypoint"`
 	Modes          *[]string `yaml:"modes"`
 	Repeat         *int      `yaml:"repeat"`
@@ -64,6 +65,7 @@ type rawCollection struct {
 
 type rawSettings struct {
 	BOFExecutor    *string         `yaml:"bof_executor"`
+	BOFExecutors   *[]string       `yaml:"bof_executors"`
 	Entrypoint     *string         `yaml:"entrypoint"`
 	Modes          *[]string       `yaml:"modes"`
 	Repeat         *int            `yaml:"repeat"`

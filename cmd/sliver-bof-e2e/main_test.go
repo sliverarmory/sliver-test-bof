@@ -190,6 +190,42 @@ func TestVerifyCaseCoverage(t *testing.T) {
 	}
 }
 
+func TestVerifyCaseCoverageRequiresBothBOFExecutors(t *testing.T) {
+	object := filepath.Join(t.TempDir(), "shared.o")
+	data := []byte("same BOF for both executors")
+	if err := os.WriteFile(object, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	plans := []manifest.Plan{
+		{
+			ID: "suite/shared/reflektor", Suite: "suite", Name: "shared", Object: object,
+			Target:   manifest.Target{OS: "windows", Arch: "amd64"},
+			Settings: manifest.Settings{BOFExecutor: manifest.ExecutorReflektor, Modes: []string{manifest.ModeSession}, Repeat: 1},
+		},
+		{
+			ID: "suite/shared/coff-loader", Suite: "suite", Name: "shared", Object: object,
+			Target:   manifest.Target{OS: "windows", Arch: "amd64"},
+			Settings: manifest.Settings{BOFExecutor: manifest.ExecutorCOFFLoader, Modes: []string{manifest.ModeSession}, Repeat: 1},
+		},
+	}
+	resultsForPlans := make([]results.CaseResult, 0, len(plans))
+	for _, plan := range plans {
+		resultsForPlans = append(resultsForPlans, results.CaseResult{
+			ID: plan.ID, Suite: plan.Suite, Test: plan.Name, ObjectSHA256: hex.EncodeToString(digest[:]),
+			Mode: manifest.ModeSession, Executor: plan.Settings.BOFExecutor, Repeat: 1, Status: "pass",
+		})
+	}
+	report := results.Report{Target: "windows/amd64", Cases: resultsForPlans}
+	if err := verifyCaseCoverage(plans, []results.Report{report}); err != nil {
+		t.Fatalf("complete dual executor coverage: %v", err)
+	}
+	report.Cases = report.Cases[:1]
+	if err := verifyCaseCoverage(plans, []results.Report{report}); err == nil || !strings.Contains(err.Error(), "missing case windows/amd64/suite/shared/coff-loader/session#1") {
+		t.Fatalf("missing COFFLoader result error = %v", err)
+	}
+}
+
 func TestVerifyReportProvenance(t *testing.T) {
 	reports := []results.Report{
 		{Target: "linux/amd64", ActionVersion: "owner/action@abc", Sliver: results.Provenance{Selector: "release:v1.2.3@0123456789012345678901234567890123456789", ResolvedSHA: "0123456789012345678901234567890123456789"}},
